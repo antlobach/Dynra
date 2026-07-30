@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">Dynra</title>
+  <desc id="desc">Dynra logo: a terminal prompt inside a dynamic D-shaped loop beside the Dynra wordmark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080B14"/>
+      <stop offset="0.55" stop-color="#0B1020"/>
+      <stop offset="1" stop-color="#11102A"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="80" y1="70" x2="318" y2="275" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.5" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#D946EF"/>
+    </linearGradient>
+    <linearGradient id="word" x1="375" y1="95" x2="880" y2="230" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#CBD5E1"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(235 115) rotate(38) scale(310 230)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6366F1" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="4" y="4" width="1192" height="332" rx="46" fill="url(#bg)" stroke="#1E293B" stroke-width="2"/>
+  <rect x="5" y="5" width="1190" height="330" rx="45" fill="url(#glow)"/>
+
+  <g aria-label="Dynra mark">
+    <path d="M104 73H190C264 73 314 111 314 170C314 229 264 267 190 267H104Z"
+          fill="#0A1020" stroke="url(#signal)" stroke-width="17" stroke-linejoin="round" filter="url(#soft-glow)"/>
+    <path d="M155 126L197 170L155 214" fill="none" stroke="#F8FAFC" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M214 216H257" fill="none" stroke="url(#signal)" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="294" cy="102" r="7" fill="#22D3EE"/>
+  </g>
+
+  <g aria-label="Dynra wordmark">
+    <text x="372" y="181" fill="url(#word)" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="94" font-weight="760" letter-spacing="14">DYNRA</text>
+    <rect x="377" y="215" width="540" height="2" rx="1" fill="url(#signal)" opacity="0.7"/>
+  </g>
+</svg>

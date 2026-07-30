@@ -1,0 +1,36 @@
+[project]
+name = "dynra"
+version = "0.1.0"
+description = "Live Python runtime for LLM coding agents"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "ipython>=8.0",
+    "mcp>=1.0,<2",
+]
+
+[project.scripts]
+dynra = "dynra:run_cli"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "dynra",
+    "dynra_core",
+    "dynra_client",
+    "dynra_extension",
+    "dynra_mcp",
+    "dynra_tools",
+]
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

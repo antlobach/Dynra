@@ -1,0 +1,45 @@
+# Python environments and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test, lint, and type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials.*
+secrets.*
+.mcp.json
+
+# Local AI-agent state and configuration
+.gemini/
+.claude/
+.codex/
+.opencode/
+
+# Runtime state
+.dynra/
+*.log
+*.pid
+test_project*/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+.#*
+\#*\#
