@@ -114,5 +114,9 @@ def dynra_repl(
     return _tool_response(response, module)
 
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

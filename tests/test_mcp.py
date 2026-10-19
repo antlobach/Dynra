@@ -3,7 +3,7 @@ import sys
 
 import pexpect
 
-from dynra_mcp import dynra_repl
+from dynra.mcp import dynra_repl
 
 
 def free_ports(count):
@@ -20,7 +20,7 @@ def free_ports(count):
 def start_server(port):
     server = pexpect.spawn(
         sys.executable,
-        ["dynra.py", "--port", str(port)],
+        ["-m", "dynra", "--port", str(port)],
         encoding="utf-8",
     )
     server.expect(r"user> ", timeout=10)
@@ -28,7 +28,9 @@ def start_server(port):
 
 
 def test_single_tool_agent_workflow():
-    server = pexpect.spawn(sys.executable, ["dynra.py"], encoding="utf-8")
+    server = pexpect.spawn(
+        sys.executable, ["-m", "dynra"], encoding="utf-8"
+    )
 
     try:
         server.expect(r"user> ", timeout=10)

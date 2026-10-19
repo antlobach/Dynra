@@ -1,6 +1,6 @@
 import sys
 
-from dynra_core import NamespaceManager, patch_class
+from dynra.core import NamespaceManager, patch_class
 
 
 def test_imported_function_reference_is_patched_in_place():

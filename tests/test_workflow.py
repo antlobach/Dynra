@@ -4,7 +4,7 @@ import sys
 import pytest
 from IPython.core.interactiveshell import InteractiveShell
 
-from dynra_core import NamespaceManager, SourceConflictError
+from dynra.core import NamespaceManager, SourceConflictError
 
 
 def _attach_shell(manager, module):
