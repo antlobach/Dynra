@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://deepwiki.com/antlobach/Dynra"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://deepwiki.com/antlobach/Dynra"><img src="assets/deepwiki-badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 ## Give coding agents a live Python process
