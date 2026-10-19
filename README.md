@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://github.com/antlobach/Dynra/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://deepwiki.com/antlobach/Dynra"><img src="assets/deepwiki-badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://github.com/antlobach/Dynra/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" height="20"></a>
+  <a href="https://deepwiki.com/antlobach/Dynra"><img src="assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>
 
 ## Overview
@@ -61,7 +61,7 @@ cd /path/to/target-project
 .venv/bin/dynra
 ```
 
-The working directory matters. Dynra reads the target's `pyproject.toml`, activates its source roots, and indexes its Python modules without importing them. The runtime listens on `127.0.0.1:9999` by default. Use `dynra --port PORT` to choose another port.
+The working directory matters. Dynra reads the target's `pyproject.toml`, activates its source roots, and indexes its Python modules without importing them. The runtime listens on `127.0.0.1:9999` by default. Use `dynra --port PORT` to start it on another port.
 
 ## Agents
 
@@ -89,10 +89,10 @@ Configure the MCP adapter in an MCP-compatible coding agent, replacing the repos
 The adapter exposes one tool:
 
 ```text
-dynra_repl(code, module="user", create=False)
+dynra_repl(code, module="user", create=False, port=9999)
 ```
 
-`module` selects the namespace before evaluation. Imports are strict, so missing modules and import-time failures return errors. Set `create=True` only for an intentional synthetic scratch module. Every response contains `success`, `module`, `result`, `stdout`, `stderr`, and `error`.
+`port` selects an existing long-running Dynra/IPython process on `127.0.0.1`; it does not start a new process. The value must match the runtime's `dynra --port PORT` option. `module` selects the namespace before evaluation. Imports are strict, so missing modules and import-time failures return errors. Set `create=True` only for an intentional synthetic scratch module. Every response contains `success`, `module`, `result`, `stdout`, `stderr`, and `error`.
 
 ### Agent workflow
 
@@ -123,6 +123,7 @@ dynra_repl(
 dynra_repl(
   module="shop.checkout",
   code="active_checkout.total()",
+  port=9999,
 )
 
 dynra_repl(

@@ -28,21 +28,22 @@ The target project must run Dynra from its repository root with the project's Py
 
 ```bash
 cd /path/to/target-project
-/path/to/target-project/.venv/bin/dynra
+/path/to/target-project/.venv/bin/dynra --port 9999
 ```
 
-The MCP adapter connects to `127.0.0.1:9999`. If `dynra_repl` returns a connection error, start the runtime before continuing. Dynra executes arbitrary Python; use it only with trusted local projects and agents.
+The MCP adapter connects to a long-running Dynra process on `127.0.0.1`. Port `9999` is the default. If the project uses another port, pass that port to every `dynra_repl` call. Selecting a port routes the call to an existing runtime; it does not start a new REPL. If `dynra_repl` returns a connection error, start the matching runtime before continuing. Dynra executes arbitrary Python; use it only with trusted local projects and agents.
 
 ## Tool contract
 
 ```text
-dynra_repl(code, module="user", create=False)
+dynra_repl(code, module="user", create=False, port=9999)
 ```
 
+- `port` selects the long-running Dynra runtime on `127.0.0.1`. It must match the runtime's `dynra --port PORT` option.
 - `module` selects the namespace before executing `code`. Pass the module that owns the definition you inspect or replace.
 - Dynra imports real modules strictly. Import errors are evidence; do not hide them by creating a namespace with the same name.
 - Set `create=True` only for an intentional scratch module.
-- State persists between calls, including imported modules, instances, collections, caches, and prior results.
+- State persists between calls sent to the same port, including imported modules, instances, collections, caches, and prior results.
 - Read `success`, `result`, `stdout`, `stderr`, and `error` on every response. `result` is a representation of the final expression, not a serialized Python object.
 
 ## How to use Dynra

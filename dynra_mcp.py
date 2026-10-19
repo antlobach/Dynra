@@ -23,8 +23,8 @@ def send_code(code: str, host="127.0.0.1", port=9999, timeout=30.0):
     except ConnectionRefusedError:
         return {
             "error": (
-                "Could not connect to the Dynra runtime at 127.0.0.1:9999. "
-                "Start it with 'uv run dynra'."
+                f"Could not connect to the Dynra runtime at {host}:{port}. "
+                f"Start it with 'uv run dynra --port {port}'."
             )
         }
     except TimeoutError:
@@ -58,13 +58,16 @@ def _tool_response(response, module):
 
 
 @mcp.tool()
-def dynra_repl(code: str, module: str = "user", create: bool = False) -> dict:
+def dynra_repl(
+    code: str, module: str = "user", create: bool = False, port: int = 9999
+) -> dict:
     """Evaluate Python in a persistent live module.
 
     Pass the owning project module when inspecting or patching source. Imports
     are strict: failures are returned instead of creating empty namespaces.
     Set ``create=True`` only when intentionally creating a synthetic scratch
-    module. State persists between calls.
+    module. Select the matching long-running runtime with ``port``. State
+    persists between calls to the same runtime.
     """
     if not _MODULE_NAME.fullmatch(module):
         return {
@@ -74,6 +77,15 @@ def dynra_repl(code: str, module: str = "user", create: bool = False) -> dict:
             "stdout": "",
             "stderr": "",
             "error": f"Invalid Python module name: {module!r}",
+        }
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return {
+            "success": False,
+            "module": module,
+            "result": None,
+            "stdout": "",
+            "stderr": "",
+            "error": f"Invalid port: {port!r}; expected an integer from 1 to 65535.",
         }
     if not code.strip():
         return {
@@ -88,7 +100,7 @@ def dynra_repl(code: str, module: str = "user", create: bool = False) -> dict:
     header = json.dumps(
         {"module": module, "create": create}, separators=(",", ":")
     )
-    response = send_code(f"DYNRA {header}\n{code}")
+    response = send_code(f"DYNRA {header}\n{code}", port=port)
     return _tool_response(response, module)
 
 
