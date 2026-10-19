@@ -102,7 +102,7 @@ Dynra automatically checks tracked project modules for external source edits bef
 - Class patches update compatible existing classes and instances. Add `__dynra_update__(self)` when existing instances need new state.
 - Dynra does not rerun decorators when redefining an existing decorated function or class. Verify any framework registry through its normal public behavior.
 - A failed multi-definition evaluation rolls back definition changes, but arbitrary side effects from ordinary statements cannot be rolled back.
-- Use `revert('package.module.name')` for one definition or `revert_all()` to discard all unpersisted live patches.
+- Use `revert(live_object)` or `revert('package.module.name')` for one definition; object-form revert follows the changed definition even when a public package re-export rewrites `__module__`. Use `revert_all()` to discard all unpersisted live patches.
 - Use `patch_log()` when the process history or current state is unclear.
 - External edits to top-level functions and classes heal automatically on the next module-scoped call. Dynra does not rerun assignments, imports, or arbitrary top-level side effects.
 - Use a module-level `__dynra_reconcile__(changes)` hook only when the application must rebuild derived state after healed definitions.
@@ -121,7 +121,7 @@ Dynra automatically checks tracked project modules for external source edits bef
 | `persist_source(target=None)` | Write exact evaluated definitions to source. |
 | `source_sync_status(module=None)` | Inspect module generation, healed state, conflicts, and live-only definitions. |
 | `patch_log()` | Inspect applied, refused, reverted, and persisted operations. |
-| `revert(target)` / `revert_all()` | Undo live definition changes. |
+| `revert(target)` / `revert_all()` | Undo live definition changes by object or qualified name. |
 
 ## Failure handling
 
