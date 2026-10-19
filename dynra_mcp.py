@@ -41,6 +41,8 @@ def _tool_response(response, module):
             "result": None,
             "stdout": "",
             "stderr": "",
+            "generation": None,
+            "source_sync": None,
             "error": response["error"],
         }
 
@@ -51,6 +53,8 @@ def _tool_response(response, module):
         "result": response.get("result"),
         "stdout": response.get("stdout", ""),
         "stderr": response.get("stderr", ""),
+        "generation": response.get("generation"),
+        "source_sync": response.get("source_sync"),
         "error": None
         if success
         else response.get("error") or "Python execution failed.",
@@ -76,6 +80,8 @@ def dynra_repl(
             "result": None,
             "stdout": "",
             "stderr": "",
+            "generation": None,
+            "source_sync": None,
             "error": f"Invalid Python module name: {module!r}",
         }
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
@@ -85,6 +91,8 @@ def dynra_repl(
             "result": None,
             "stdout": "",
             "stderr": "",
+            "generation": None,
+            "source_sync": None,
             "error": f"Invalid port: {port!r}; expected an integer from 1 to 65535.",
         }
     if not code.strip():
@@ -94,6 +102,8 @@ def dynra_repl(
             "result": None,
             "stdout": "",
             "stderr": "",
+            "generation": None,
+            "source_sync": None,
             "error": "Code must not be empty.",
         }
 

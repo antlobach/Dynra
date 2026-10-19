@@ -44,7 +44,7 @@ dynra_repl(code, module="user", create=False, port=9999)
 - Dynra imports real modules strictly. Import errors are evidence; do not hide them by creating a namespace with the same name.
 - Set `create=True` only for an intentional scratch module.
 - State persists between calls sent to the same port, including imported modules, instances, collections, caches, and prior results.
-- Read `success`, `result`, `stdout`, `stderr`, and `error` on every response. `result` is a representation of the final expression, not a serialized Python object.
+- Read `success`, `result`, `stdout`, `stderr`, `error`, `generation`, and `source_sync` on every response. `result` is a representation of the final expression, not a serialized Python object.
 
 ## How to use Dynra
 
@@ -74,6 +74,8 @@ dynra_repl(code, module="user", create=False, port=9999)
 
 5. Verify through the real consumer, not only through the patched function. Switch modules with the `module` argument instead of calling `in_md()` separately.
 
+Dynra automatically checks the selected module for external source edits before executing the request. Inspect `source_sync`: `healed` means changed top-level functions or classes were applied in place; `conflict` means both disk and the live REPL changed the same definition. Do not ignore conflicts.
+
 6. Inspect live-versus-disk changes:
 
    ```text
@@ -101,6 +103,8 @@ dynra_repl(code, module="user", create=False, port=9999)
 - A failed multi-definition evaluation rolls back definition changes, but arbitrary side effects from ordinary statements cannot be rolled back.
 - Use `revert('package.module.name')` for one definition or `revert_all()` to discard all unpersisted live patches.
 - Use `patch_log()` when the process history or current state is unclear.
+- External edits to top-level functions and classes heal automatically on the next module-scoped call. Dynra does not rerun assignments, imports, or arbitrary top-level side effects.
+- Use a module-level `__dynra_reconcile__(changes)` hook only when the application must rebuild derived state after healed definitions.
 
 ## Namespace commands
 
@@ -114,6 +118,7 @@ dynra_repl(code, module="user", create=False, port=9999)
 | `find_var(pattern)` | Search loaded modules for symbol names. |
 | `diverged()` / `source_patch()` | Compare live definitions with source files. |
 | `persist_source(target=None)` | Write exact evaluated definitions to source. |
+| `source_sync_status(module=None)` | Inspect module generation, healed state, conflicts, and live-only definitions. |
 | `patch_log()` | Inspect applied, refused, reverted, and persisted operations. |
 | `revert(target)` / `revert_all()` | Undo live definition changes. |
 
@@ -122,4 +127,4 @@ dynra_repl(code, module="user", create=False, port=9999)
 - **Import failure:** fix the environment, dependency, or module error. Do not use `create=True` as a fallback.
 - **Patch refusal:** inspect holders and compatibility constraints. Prefer a compatible definition or restart when the change requires a new closure layout, sync/async boundary, metaclass, base class, or slots layout.
 - **Unexpected behavior after a patch:** inspect `patch_log()` and `source_patch()`, then revert before testing a different hypothesis.
-- **Source changed outside Dynra:** inspect the live and disk definitions before persisting. Do not overwrite a concurrent edit blindly.
+- **Source conflict:** keep working state intact, inspect `source_sync` and `source_patch()`, then explicitly choose the disk or live definition. `persist_source()` will not overwrite the external edit.

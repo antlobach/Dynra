@@ -4,7 +4,7 @@ import sys
 import pytest
 from IPython.core.interactiveshell import InteractiveShell
 
-from dynra_core import NamespaceManager
+from dynra_core import NamespaceManager, SourceConflictError
 
 
 def _attach_shell(manager, module):
@@ -143,6 +143,7 @@ def test_revert_unmap_divergence_and_source_persistence(tmp_path):
         assert module.value is original
         assert module.value() == 1
         assert manager.diverged() == {}
+        assert manager.source_sync_status()["status"] == "clean"
 
         assert manager.execute_code("def value():\n    return 3\n").success
         assert manager.persist_source("value") == ("persistpkg.logic.value",)
@@ -161,3 +162,97 @@ def test_revert_unmap_divergence_and_source_persistence(tmp_path):
     finally:
         sys.modules.pop("persistpkg.logic", None)
         sys.modules.pop("persistpkg", None)
+
+
+def test_external_definition_edits_autoheal_without_reloading_importers(tmp_path):
+    package = tmp_path / "src" / "healpkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source_file = package / "logic.py"
+    source_file.write_text(
+        "events = []\n"
+        "CONSTANT = 1\n"
+        "def value():\n"
+        "    return 1\n\n"
+        "def removed():\n"
+        "    return 'old'\n\n"
+        "def __dynra_reconcile__(changes):\n"
+        "    events.append(changes)\n",
+        encoding="utf-8",
+    )
+    (package / "consumer.py").write_text(
+        "from healpkg.logic import removed, value\n",
+        encoding="utf-8",
+    )
+
+    manager = NamespaceManager(project_root=tmp_path)
+    consumer = manager.in_md("healpkg.consumer")
+    logic = manager.in_md("healpkg.logic")
+    _attach_shell(manager, logic)
+    manager.in_md("healpkg.logic")
+    original = logic.value
+    try:
+        source_file.write_text(
+            "events = []\n"
+            "CONSTANT = 2\n"
+            "def value():\n"
+            "    return 2\n\n"
+            "def added():\n"
+            "    return 'new'\n\n"
+            "def __dynra_reconcile__(changes):\n"
+            "    events.append(changes)\n",
+            encoding="utf-8",
+        )
+
+        execution = manager.execute_code("value()")
+        assert execution.success
+        assert execution.result == 2
+
+        assert logic.value is original
+        assert consumer.value is original
+        assert consumer.value() == 2
+        assert logic.added() == "new"
+        assert not hasattr(logic, "removed")
+        assert not hasattr(consumer, "removed")
+        assert logic.CONSTANT == 1
+        assert manager.last_source_sync["status"] == "healed"
+        assert manager.last_source_sync["generation"] == 1
+        assert {change["action"] for change in logic.events[-1]} == {
+            "added",
+            "removed",
+            "updated",
+        }
+    finally:
+        for name in ("healpkg.consumer", "healpkg.logic", "healpkg"):
+            sys.modules.pop(name, None)
+
+
+def test_external_edit_conflicts_with_live_patch_and_blocks_persistence(tmp_path):
+    package = tmp_path / "src" / "conflictpkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source_file = package / "logic.py"
+    source_file.write_text("def value():\n    return 1\n", encoding="utf-8")
+
+    manager = NamespaceManager(project_root=tmp_path)
+    module = manager.in_md("conflictpkg.logic")
+    _attach_shell(manager, module)
+    manager.in_md("conflictpkg.logic")
+    try:
+        assert manager.execute_code("def value():\n    return 2\n").success
+        assert manager.module_generation() == 1
+        source_file.write_text("def value():\n    return 3\n", encoding="utf-8")
+
+        manager.in_md("conflictpkg.logic")
+
+        assert module.value() == 2
+        assert manager.last_source_sync["status"] == "conflict"
+        assert manager.last_source_sync["conflicts"] == (
+            "conflictpkg.logic.value",
+        )
+        with pytest.raises(SourceConflictError):
+            manager.persist_source("value")
+        assert "return 3" in source_file.read_text(encoding="utf-8")
+    finally:
+        for name in ("conflictpkg.logic", "conflictpkg"):
+            sys.modules.pop(name, None)

@@ -92,7 +92,7 @@ The adapter exposes one tool:
 dynra_repl(code, module="user", create=False, port=9999)
 ```
 
-`port` selects an existing long-running Dynra/IPython process on `127.0.0.1`; it does not start a new process. The value must match the runtime's `dynra --port PORT` option. `module` selects the namespace before evaluation. Imports are strict, so missing modules and import-time failures return errors. Set `create=True` only for an intentional synthetic scratch module. Every response contains `success`, `module`, `result`, `stdout`, `stderr`, and `error`.
+`port` selects an existing long-running Dynra/IPython process on `127.0.0.1`; it does not start a new process. The value must match the runtime's `dynra --port PORT` option. `module` selects the namespace before evaluation. Imports are strict, so missing modules and import-time failures return errors. Set `create=True` only for an intentional synthetic scratch module. Every response contains `success`, `module`, `result`, `stdout`, `stderr`, `error`, `generation`, and `source_sync`.
 
 ### Agent workflow
 
@@ -146,6 +146,22 @@ Dynra starts in a synthetic `user` namespace. Use the `module` argument on `dynr
 
 Dynra supplies its commands through REPL builtins. It does not add those names to application module globals.
 
+## Source healing
+
+Before each module-scoped evaluation, Dynra checks that module's source-file signature. The clean path performs one metadata check. Dynra parses a file only after its signature changes.
+
+External edits to top-level functions and classes are applied automatically to the existing live objects. Prior imports and compatible instances therefore receive the new behavior without module reloads. Added definitions are evaluated in the live namespace. Deleted definitions are removed from the owning module and direct module imports. Each healed batch increments the module generation and appears in the response's `source_sync` field.
+
+A module can repair derived state through an opt-in hook:
+
+```python
+def __dynra_reconcile__(changes):
+    if any(change[\"definition\"].endswith(\".build_routes\") for change in changes):
+        rebuild_routes_in_place()
+```
+
+Dynra does not rerun arbitrary assignments, imports, or top-level side effects. Constants and copied values retain normal Python semantics. If both disk and the REPL changed the same definition, Dynra keeps the live definition and reports a conflict instead of guessing. `persist_source()` uses the captured base definition and refuses to overwrite an external edit.
+
 ## Live patch model
 
 Remote code executes one top-level statement at a time. After each function or class definition, Dynra reconciles the new object with the live object:
@@ -194,6 +210,7 @@ After the patch, existing `Session` instances use the new methods and run `__dyn
 | `revert(target)` / `revert_all()` | Restore one or all live definition snapshots. |
 | `diverged()` / `source_patch()` | Show unified diffs between live definitions and source files. |
 | `persist_source(target=None)` | Write exact evaluated definitions to their project source files. |
+| `source_sync_status(module=None)` | Show source freshness, conflicts, live definitions, and generation. |
 | `help_dynra()` | Show runtime help. |
 
 ## Terminal client
