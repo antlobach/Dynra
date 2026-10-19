@@ -1,14 +1,12 @@
 import sys
 import time
-from pathlib import Path
 
 import pexpect
 
 
-PROJECT_ROOT = Path(__file__).parent
 
 
-def test_repl_autoreload_and_namespaces(tmp_path):
+def test_repl_source_healing_and_namespaces(tmp_path):
     package = tmp_path / "pkg"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -19,7 +17,7 @@ def test_repl_autoreload_and_namespaces(tmp_path):
 
     child = pexpect.spawn(
         sys.executable,
-        [str(PROJECT_ROOT / "dynra.py")],
+        ["-m", "dynra"],
         cwd=str(tmp_path),
         encoding="utf-8",
         timeout=10,

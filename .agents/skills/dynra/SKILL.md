@@ -74,7 +74,7 @@ dynra_repl(code, module="user", create=False, port=9999)
 
 5. Verify through the real consumer, not only through the patched function. Switch modules with the `module` argument instead of calling `in_md()` separately.
 
-Dynra automatically checks the selected module for external source edits before executing the request. Inspect `source_sync`: `healed` means changed top-level functions or classes were applied in place; `conflict` means both disk and the live REPL changed the same definition. Do not ignore conflicts.
+Dynra automatically checks tracked project modules for external source edits before executing the request. Inspect `source_sync`: `healed` means changed top-level functions or classes were applied in place; `conflict` means both disk and the live REPL changed the same definition. Do not ignore conflicts.
 
 6. Inspect live-versus-disk changes:
 

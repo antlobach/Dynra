@@ -9,7 +9,7 @@ not.
 
 import sys
 
-from dynra_core import (
+from dynra.core import (
     NamespaceManager,
     analyze_function_patch_compatibility,
     direct_holders,

@@ -12,7 +12,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://github.com/antlobach/Dynra/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" height="20"></a>
+  <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/antlobach/Dynra/ci.yml?branch=main&amp;style=flat-square&amp;label=tests" alt="Tests" height="20"></a>
+  <a href="https://codecov.io/gh/antlobach/Dynra"><img src="https://img.shields.io/codecov/c/github/antlobach/Dynra?style=flat-square" alt="Coverage" height="20"></a>
+  <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
+  <a href="https://github.com/antlobach/Dynra/releases"><img src="https://img.shields.io/github/v/release/antlobach/Dynra?style=flat-square&amp;display_name=tag" alt="Release" height="20"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/antlobach/Dynra?style=flat-square" alt="Apache-2.0 license" height="20"></a>
   <a href="https://deepwiki.com/antlobach/Dynra"><img src="assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>
 
@@ -67,20 +71,13 @@ The working directory matters. Dynra reads the target's `pyproject.toml`, activa
 
 The repository includes a [Dynra agent skill](.agents/skills/dynra/SKILL.md). Give that skill to an agent that can call the MCP server. It defines the live-development loop, patching constraints, failure handling, and the point at which a verified live change should become a source edit.
 
-Configure the MCP adapter in an MCP-compatible coding agent, replacing the repository path:
+Configure the installed MCP adapter in an MCP-compatible coding agent, replacing the target environment path:
 
 ```json
 {
   "mcpServers": {
     "dynra": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/absolute/path/to/Dynra",
-        "run",
-        "python",
-        "dynra_mcp.py"
-      ]
+      "command": "/absolute/path/to/target-project/.venv/bin/dynra-mcp"
     }
   }
 }
@@ -148,7 +145,7 @@ Dynra supplies its commands through REPL builtins. It does not add those names t
 
 ## Source healing
 
-Before each module-scoped evaluation, Dynra checks that module's source-file signature. The clean path performs one metadata check. Dynra parses a file only after its signature changes.
+Before each evaluation, Dynra checks the source-file signatures of tracked project modules. The clean path performs metadata checks only. Dynra parses a file after its signature changes.
 
 External edits to top-level functions and classes are applied automatically to the existing live objects. Prior imports and compatible instances therefore receive the new behavior without module reloads. Added definitions are evaluated in the live namespace. Deleted definitions are removed from the owning module and direct module imports. Each healed batch increments the module generation and appears in the response's `source_sync` field.
 
@@ -215,11 +212,11 @@ After the patch, existing `Session` instances use the new methods and run `__dyn
 
 ## Terminal client
 
-The interactive runtime accepts normal IPython input. `dynra_client.py` sends a one-off evaluation to an existing runtime:
+The interactive runtime accepts normal IPython input. `dynra-client` sends a one-off evaluation to an existing runtime:
 
 ```bash
-python /path/to/Dynra/dynra_client.py --module package.module "expression"
-python /path/to/Dynra/dynra_client.py --module scratch --create "value = 1"
+dynra-client --module package.module "expression"
+dynra-client --module scratch --create "value = 1"
 ```
 
 ## Security

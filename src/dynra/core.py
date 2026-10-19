@@ -13,7 +13,7 @@ import types
 from dataclasses import dataclass
 from pathlib import Path
 
-from dynra_project import ProjectLayout
+from .project import ProjectLayout
 
 #: CPython flag marking a code object as a coroutine.
 CO_COROUTINE = 0x0080
@@ -273,6 +273,7 @@ class NamespaceManager:
         self._module_generations: dict[str, int] = {}
         self.last_source_sync: dict = {}
         self._reconciling_source = False
+        self._executing_module_name: str | None = None
         self._sequence = 0
         self._active_snapshot: DefinitionSnapshot | None = None
         self._pending_source: str | None = None
@@ -566,6 +567,57 @@ class NamespaceManager:
             "changes": tuple(changes),
         }
 
+    def reconcile_tracked_sources(self):
+        """Heal every tracked project module before evaluating the current one."""
+        if not self.shell:
+            return self.reconcile_module_source()
+        original_module = self.shell.user_module
+        original_namespace = self.shell.user_ns
+        original_name = self.current_name
+        reports = []
+        try:
+            for module_name in sorted(self._source_snapshots):
+                module = sys.modules.get(module_name)
+                if not isinstance(module, types.ModuleType):
+                    continue
+                self._init_ipython_ns(module.__dict__)
+                self.shell.user_ns = module.__dict__
+                self.shell.user_module = module
+                self.current_name = module_name
+                report = self.reconcile_module_source(module_name)
+                if (
+                    report["status"] != "clean"
+                    or report["changes"]
+                    or report["conflicts"]
+                ):
+                    reports.append(report)
+        finally:
+            self._init_ipython_ns(original_namespace)
+            self.shell.user_ns = original_namespace
+            self.shell.user_module = original_module
+            self.current_name = original_name
+
+        aggregate = self.source_sync_status(original_name)
+        if not reports:
+            return aggregate
+        aggregate["changes"] = tuple(
+            change for report in reports for change in report["changes"]
+        )
+        aggregate["conflicts"] = tuple(
+            conflict for report in reports for conflict in report["conflicts"]
+        )
+        errors = tuple(
+            report["error"] for report in reports if report.get("error")
+        )
+        if errors:
+            aggregate["status"] = "error"
+            aggregate["errors"] = errors
+        elif aggregate["conflicts"]:
+            aggregate["status"] = "conflict"
+        elif aggregate["changes"]:
+            aggregate["status"] = "healed"
+        return aggregate
+
     def module_catalog(self):
         discovered = set(self.project.modules)
         loaded_project = {
@@ -687,7 +739,10 @@ class NamespaceManager:
         if not self.shell:
             return
         if not self._reconciling_source:
-            self.last_source_sync = self.reconcile_module_source()
+            self.last_source_sync = self.reconcile_tracked_sources()
+        self._executing_module_name = getattr(
+            self.shell.user_module, "__name__", self.current_name
+        )
         namespace = self.shell.user_ns
         self.prev_ns_snapshot = {name: id(value) for name, value in namespace.items()}
         self.prev_objects = dict(namespace)
@@ -699,6 +754,12 @@ class NamespaceManager:
         namespace = self.shell.user_ns
         module_name = getattr(self.shell.user_module, "__name__", None)
         if not module_name:
+            return
+        if module_name != self._executing_module_name:
+            self.prev_ns_snapshot = {
+                name: id(value) for name, value in namespace.items()
+            }
+            self.prev_objects = dict(namespace)
             return
         for name, obj in list(namespace.items()):
             if name.startswith("_") or getattr(obj, "__module__", None) != module_name:

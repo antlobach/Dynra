@@ -9,7 +9,7 @@ import threading
 from IPython.terminal.ipapp import TerminalIPythonApp
 from IPython.terminal.prompts import Prompts, Token
 
-from dynra_core import NamespaceManager
+from .core import NamespaceManager
 
 
 class DynraPrompts(Prompts):
@@ -82,6 +82,7 @@ class DynraServer(threading.Thread):
                     )
                     if execution.error is not None:
                         error = f"{type(execution.error).__name__}: {execution.error}"
+                    source_sync = self.manager.last_source_sync
                 else:
                     success = True
         except Exception as exception:
@@ -155,11 +156,7 @@ def main():
 
     manager.shell = shell
 
-    # Enable Autoreload
-    shell.extension_manager.load_extension("autoreload")
-    shell.run_line_magic("autoreload", "2")
 
-    # Enable Dynra Patching
     shell.events.register("pre_execute", manager.pre_execute)
     shell.events.register("post_execute", manager.post_execute)
 
@@ -171,7 +168,6 @@ def main():
     )
     shell.prompts = DynraPrompts(shell, manager)
 
-    # ALWAYS Start Remote Server immediately
     server = DynraServer(shell, manager, port=args.port)
     server.start()
 
@@ -188,7 +184,6 @@ def main():
 
 
 def run_cli():
-    """Entry point for uv run dynra"""
     main()
 
 
