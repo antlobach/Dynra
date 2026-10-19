@@ -367,7 +367,7 @@ class NamespaceManager:
             if key not in mod_dict or key in {"In", "Out", "_oh", "_ih"}:
                 mod_dict[key] = value
 
-    def in_md(self, name):
+    def in_md(self, name, *, announce=True):
         """Enter a loaded, discoverable, or importable module."""
         already_tracked = name in self._source_snapshots
         mod = self.require_md(name)
@@ -376,7 +376,8 @@ class NamespaceManager:
             self._init_ipython_ns(mod.__dict__)
             self.shell.user_ns = mod.__dict__
             self.shell.user_module = mod
-            print(f"Switched to module '{name}'")
+            if announce:
+                print(f"Switched to module '{name}'")
         if already_tracked:
             self.last_source_sync = self.reconcile_module_source(name)
             if self.shell:
@@ -1012,14 +1013,14 @@ class NamespaceManager:
             elif isinstance(new_obj, type) and isinstance(old_obj, type):
                 patch_class(old_obj, new_obj, safe_mode=self.safe_class_patching)
 
-    def execute_code(self, code):
+    def execute_code(self, code, *, silent=False):
         """Evaluate top-level statements sequentially and roll back failed batches."""
         if not self.shell:
             raise RuntimeError("execute_code requires an attached shell")
         try:
             tree = ast.parse(code)
         except SyntaxError:
-            result = self.shell.run_cell(code, store_history=False, silent=False)
+            result = self.shell.run_cell(code, store_history=False, silent=silent)
             return ManagedExecutionResult(result.success, result.result)
 
         module_name = getattr(self.shell.user_module, "__name__", self.current_name)
@@ -1040,10 +1041,18 @@ class NamespaceManager:
         source_bases = dict(self._source_bases)
         module_generations = dict(self._module_generations)
         last_result = None
+        result_name = f"__dynra_result_{id(self):x}"
 
         for node in tree.body:
             source = self._statement_source(code, node)
             executable = source
+            captures_result = silent and isinstance(node, ast.Expr)
+            if captures_result:
+                assignment = ast.Assign(
+                    targets=[ast.Name(id=result_name, ctx=ast.Store())],
+                    value=node.value,
+                )
+                executable = ast.unparse(ast.fix_missing_locations(assignment))
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
                 and node.decorator_list
@@ -1059,11 +1068,12 @@ class NamespaceManager:
             self._pending_source = source
             try:
                 result = self.shell.run_cell(
-                    executable, store_history=False, silent=False
+                    executable, store_history=False, silent=silent
                 )
             finally:
                 self._pending_source = None
             if not result.success or self._patch_refused:
+                namespace.pop(result_name, None)
                 for snapshot in transaction.values():
                     self._restore_snapshot(snapshot)
                 del self.history[history_length:]
@@ -1087,7 +1097,11 @@ class NamespaceManager:
                     getattr(result, "error_in_exec", None)
                     or getattr(result, "error_before_exec", None),
                 )
-            last_result = result.result
+            last_result = (
+                namespace.pop(result_name, None)
+                if captures_result
+                else result.result
+            )
         return ManagedExecutionResult(True, last_result)
 
     @staticmethod

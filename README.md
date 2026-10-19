@@ -85,7 +85,7 @@ The adapter exposes one tool:
 dynra_repl(code, module="user", create=False, port=9999)
 ```
 
-`port` selects an existing long-running Dynra/IPython process on `127.0.0.1`; it does not start a new process. The value must match the runtime's `dynra --port PORT` option. `module` selects the namespace before evaluation. Imports are strict, so missing modules and import-time failures return errors. Set `create=True` only for an intentional synthetic scratch module. Every response contains `success`, `module`, `result`, `stdout`, `stderr`, `error`, `generation`, and `source_sync`.
+`port` selects an existing long-running Dynra/IPython process on `127.0.0.1`; it does not start a new process. The value must match the runtime's `dynra --port PORT` option. `module` selects the namespace before evaluation. Imports are strict, so missing modules and import-time failures return errors. Set `create=True` only for an intentional synthetic scratch module. Responses always contain `success`. Dynra includes `result`, `stdout`, `stderr`, and `error` only when they carry information, and includes `source_sync` only for live changes, healing, conflicts, or source errors. An absent `source_sync` means the selected module is clean.
 
 ### Agent workflow
 

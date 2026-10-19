@@ -36,11 +36,7 @@ def test_single_tool_agent_workflow():
         server.expect(r"user> ", timeout=10)
 
         response = dynra_repl(code="1 + 1")
-        assert response["success"]
-        assert response["module"] == "user"
-        assert response["result"] == "2"
-        assert response["generation"] == 0
-        assert response["source_sync"]["status"] == "clean"
+        assert response == {"success": True, "result": "2"}
 
         response = dynra_repl(
             module="agent_lib",
@@ -48,8 +44,11 @@ def test_single_tool_agent_workflow():
             create=True,
         )
         assert response["success"]
-        assert response["generation"] == 1
-        assert response["source_sync"]["status"] == "live-newer"
+        assert response["source_sync"] == {
+            "status": "live-newer",
+            "generation": 1,
+            "live": ["agent_lib.get_value"],
+        }
 
         response = dynra_repl(
             module="agent_app",
@@ -68,13 +67,21 @@ def test_single_tool_agent_workflow():
         response = dynra_repl(module="agent_app", code="get_value()")
         assert response["result"] == "100"
 
+        response = dynra_repl(
+            module="agent_app", code="print('visible output')"
+        )
+        assert response == {"success": True, "stdout": "visible output"}
+
         response = dynra_repl(module="invalid-module", code="x = 1")
-        assert not response["success"]
-        assert "Invalid Python module name" in response["error"]
+        assert response == {
+            "success": False,
+            "error": "Invalid Python module name: 'invalid-module'",
+        }
 
         response = dynra_repl(code="1 / 0")
         assert not response["success"]
-        assert "ZeroDivisionError" in response["stdout"] + response["stderr"]
+        assert "ZeroDivisionError" in response["stdout"]
+        assert response["error"] == "ZeroDivisionError: division by zero"
     finally:
         server.terminate(force=True)
 
@@ -102,5 +109,13 @@ def test_agent_rejects_invalid_runtime_ports():
     for port in (0, 65536, True, "9999"):
         response = dynra_repl(code="1 + 1", port=port)
 
-        assert not response["success"]
+        assert response["success"] is False
+        assert set(response) == {"success", "error"}
         assert "Invalid port" in response["error"]
+
+
+def test_agent_rejects_empty_code_without_response_noise():
+    assert dynra_repl(code=" \n ") == {
+        "success": False,
+        "error": "Code must not be empty.",
+    }
