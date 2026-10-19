@@ -124,7 +124,12 @@ def main():
     manager = NamespaceManager()
 
     app = TerminalIPythonApp.instance()
-    app.initialize(argv=["--TerminalInteractiveShell.colors=NoColor"])
+    app.initialize(
+        argv=[
+            "--TerminalInteractiveShell.colors=NoColor",
+            "--TerminalInteractiveShell.simple_prompt=True",
+        ]
+    )
 
     shell = app.shell
     shell.colors = "NoColor"  # Disable ANSI colors
