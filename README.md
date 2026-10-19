@@ -198,9 +198,9 @@ After the patch, existing `Session` instances use the new methods and run `__dyn
 | `find_var(pattern)` | Search loaded modules for matching symbol names. |
 | `function_patch_mode(mode=None)` | Read or set `safe` or `permissive` function patching. |
 | `class_patch_mode(mode=None)` | Read or set `safe` or `permissive` class patching. |
-| `unmap(name)` | Delete a binding and report remaining direct holders. |
+| `unmap(name)` | Delete a binding and report remaining direct holders and qualified module aliases. |
 | `patch_log()` | Show applied, refused, reverted, and persisted operations. |
-| `revert(target)` / `revert_all()` | Restore one or all live definition snapshots. |
+| `revert(target)` / `revert_all()` | Restore one or all live definition snapshots; `target` may be the live function/class object or a qualified name. |
 | `diverged()` / `source_patch()` | Show unified diffs between live definitions and source files. |
 | `persist_source(target=None)` | Write exact evaluated definitions to their project source files. |
 | `source_sync_status(module=None)` | Show source freshness, conflicts, live definitions, and generation. |

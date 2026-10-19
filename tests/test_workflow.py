@@ -152,10 +152,13 @@ def test_revert_unmap_divergence_and_source_persistence(tmp_path):
         assert manager.diverged() == {}
 
         registry = [module.value]
+        module.value_alias = module.value
         holders = manager.unmap("value")
         assert "list" in holders
+        assert "persistpkg.logic.value_alias" in holders
         assert "value" not in module.__dict__
         assert registry[0]() == 3
+        assert module.value_alias is registry[0]
         assert any(entry["action"] == "unmap" for entry in manager.patch_log())
         manager.revert("persistpkg.logic.value")
         assert module.value is registry[0]
@@ -163,6 +166,38 @@ def test_revert_unmap_divergence_and_source_persistence(tmp_path):
         sys.modules.pop("persistpkg.logic", None)
         sys.modules.pop("persistpkg", None)
 
+
+def test_object_revert_uses_definition_owner_instead_of_public_module(tmp_path):
+    package = tmp_path / "revertpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from .logic import Exported\nExported.__module__ = __name__\n",
+        encoding="utf-8",
+    )
+    (package / "logic.py").write_text(
+        "class Exported:\n    def value(self):\n        return 1\n",
+        encoding="utf-8",
+    )
+
+    manager = NamespaceManager(project_root=tmp_path)
+    module = manager.in_md("revertpkg.logic")
+    _attach_shell(manager, module)
+    manager.in_md("revertpkg.logic")
+    try:
+        exported = module.Exported
+        assert exported.__module__ == "revertpkg"
+        assert manager.execute_code(
+            "class Exported:\n"
+            "    def value(self):\n"
+            "        return 2\n"
+        ).success
+        assert exported().value() == 2
+
+        assert manager.revert(exported) is exported
+        assert exported().value() == 1
+    finally:
+        sys.modules.pop("revertpkg.logic", None)
+        sys.modules.pop("revertpkg", None)
 
 def test_external_definition_edits_autoheal_without_reloading_importers(tmp_path):
     package = tmp_path / "src" / "healpkg"

@@ -132,6 +132,18 @@ def _module_dict_ids():
     return ids
 
 
+def _module_bindings(obj):
+    """Return qualified module names that directly reference ``obj``."""
+    bindings = []
+    for module_name, module in list(sys.modules.items()):
+        if not isinstance(module, types.ModuleType):
+            continue
+        for name, value in list(module.__dict__.items()):
+            if value is obj:
+                bindings.append(f"{module_name}.{name}")
+    return bindings
+
+
 def direct_holders(obj, ignore_ids=()):
     """Describe containers that hold `obj` directly, other than module namespaces.
 
@@ -1114,6 +1126,24 @@ class NamespaceManager:
 
     def _resolve_target(self, target):
         if isinstance(target, (types.FunctionType, type)):
+            matches = []
+            for key, stack in self._undo_stacks.items():
+                if not stack:
+                    continue
+                module = sys.modules.get(key[0])
+                mapped = module is not None and module.__dict__.get(key[1]) is target
+                if mapped or stack[-1].obj is target:
+                    matches.append(key)
+            if matches:
+                named = [key for key in matches if key[1] == target.__name__]
+                if len(named) == 1:
+                    return named[0]
+                current = [key for key in matches if key[0] == self.current_name]
+                candidates = current or named or matches
+                return max(
+                    candidates,
+                    key=lambda key: self._undo_stacks[key][-1].sequence,
+                )
             return target.__module__, target.__name__
         if not isinstance(target, str):
             raise TypeError("target must be a definition or qualified name")
@@ -1148,6 +1178,7 @@ class NamespaceManager:
             obj,
             ignore_ids=self._internal_holder_ids() | {id(namespace)},
         )
+        holders.extend(_module_bindings(obj))
         result = tuple(sorted(set(holders)))
         print(
             f"Unmapped {module_name}.{name}; remaining holders: "
