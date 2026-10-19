@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "ipython>=8.0",
     "mcp>=1.0,<2",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ py-modules = [
     "dynra_client",
     "dynra_extension",
     "dynra_mcp",
+    "dynra_project",
     "dynra_tools",
 ]
 

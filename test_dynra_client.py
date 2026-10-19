@@ -19,7 +19,7 @@ def test_cli_client_server():
             assert result.returncode == 0, result.stderr
             return result.stdout.strip()
 
-        run_client('md("cli_test")')
+        run_client('create_md("cli_test")')
         run_client('in_md("cli_test")')
         run_client("def multiply(a, b): return a * b")
         assert "50" in run_client("multiply(10, 5)")
