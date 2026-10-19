@@ -44,7 +44,8 @@ dynra_repl(code, module="user", create=False, port=9999)
 - Dynra imports real modules strictly. Import errors are evidence; do not hide them by creating a namespace with the same name.
 - Set `create=True` only for an intentional scratch module.
 - State persists between calls sent to the same port, including imported modules, instances, collections, caches, and prior results.
-- Read `success`, `result`, `stdout`, `stderr`, `error`, `generation`, and `source_sync` on every response. `result` is a representation of the final expression, not a serialized Python object.
+- Every response contains `success`. Read `result`, `stdout`, `stderr`, and `error` when present. `source_sync` appears only for live changes, healing, conflicts, or source errors; its absence means the selected module is clean. `result` is a representation of the final expression, not a serialized Python object.
+- Keep each call focused. Prefer a final expression over `print()` wrappers. Do not print `source_sync_status()` after every successful evaluation; Dynra adds `source_sync` when source state is actionable. Query it explicitly only while investigating state.
 
 ## How to use Dynra
 

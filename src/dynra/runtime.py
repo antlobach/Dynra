@@ -68,12 +68,12 @@ class DynraServer(threading.Thread):
                     module = request["module"]
                     if request.get("create"):
                         self.manager.create_md(module)
-                    self.manager.in_md(module)
+                    self.manager.in_md(module, announce=False)
                     source_sync = self.manager.last_source_sync
                 else:
                     source_sync = self.manager.reconcile_module_source()
                 if code.strip():
-                    execution = self.manager.execute_code(code)
+                    execution = self.manager.execute_code(code, silent=request is not None)
                     success = execution.success
                     result_value = (
                         repr(execution.result)
