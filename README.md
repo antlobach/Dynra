@@ -8,10 +8,6 @@
 </p>
 
 <p align="center">
-  <code>Python 3.10+</code> · <code>Model Context Protocol</code> · <code>IPython</code> · <code>State-preserving patches</code>
-</p>
-
-<p align="center">
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/antlobach/Dynra/ci.yml?branch=main&amp;style=flat-square&amp;label=tests" alt="Tests" height="20"></a>
   <a href="https://codecov.io/gh/antlobach/Dynra"><img src="https://img.shields.io/codecov/c/github/antlobach/Dynra?style=flat-square" alt="Coverage" height="20"></a>
   <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
