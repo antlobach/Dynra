@@ -9,9 +9,9 @@
 
 <p align="center">
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/antlobach/Dynra/ci.yml?branch=main&amp;style=flat-square&amp;label=tests" alt="Tests" height="20"></a>
-  <a href="https://codecov.io/gh/antlobach/Dynra"><img src="https://img.shields.io/codecov/c/github/antlobach/Dynra?style=flat-square" alt="Coverage" height="20"></a>
+  <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-%E2%89%A565%25-brightgreen?style=flat-square" alt="Coverage ≥65%" height="20"></a>
   <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
-  <a href="https://github.com/antlobach/Dynra/releases"><img src="https://img.shields.io/github/v/release/antlobach/Dynra?style=flat-square&amp;display_name=tag" alt="Release" height="20"></a>
+  <a href="https://github.com/antlobach/Dynra/releases/latest"><img src="https://img.shields.io/github/v/release/antlobach/Dynra?style=flat-square&amp;display_name=tag&amp;cacheSeconds=300" alt="Latest release" height="20"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/antlobach/Dynra?style=flat-square" alt="Apache-2.0 license" height="20"></a>
   <a href="https://deepwiki.com/antlobach/Dynra"><img src="assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>

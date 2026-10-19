@@ -12,7 +12,6 @@ dist/
 .ruff_cache/
 .mypy_cache/
 .coverage
-coverage.xml
 htmlcov/
 
 # Secrets and machine-local configuration
