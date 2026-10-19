@@ -33,9 +33,6 @@ jobs:
   coverage:
     name: Test coverage
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -43,10 +40,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --frozen --group dev
-      - run: uv run pytest --cov=dynra --cov-report=xml
-      - uses: codecov/codecov-action@v5
-        with:
-          use_oidc: true
+      - run: uv run pytest --cov=dynra --cov-report=term --cov-fail-under=65
 
   build:
     name: Build package
