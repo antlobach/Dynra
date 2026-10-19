@@ -1,14 +1,14 @@
-import sys
-import builtins
-import os
-import socket
-import threading
+import argparse
+import contextlib
 import io
 import json
-import contextlib
-import re
+import socket
+import sys
+import threading
+
 from IPython.terminal.ipapp import TerminalIPythonApp
 from IPython.terminal.prompts import Prompts, Token
+
 from dynra_core import NamespaceManager
 
 
@@ -33,85 +33,64 @@ class DynraServer(threading.Thread):
         self.port = port
 
     def run(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((self.host, self.port))
-            s.listen()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((self.host, self.port))
+            server.listen()
             while True:
-                conn, addr = s.accept()
-                with conn:
-                    try:
-                        # Read ALL data from the connection
-                        chunks = []
-                        while True:
-                            chunk = conn.recv(4096)
-                            if not chunk:
-                                break
-                            chunks.append(chunk)
+                connection, _ = server.accept()
+                with connection:
+                    chunks = []
+                    while chunk := connection.recv(4096):
+                        chunks.append(chunk)
+                    payload = b"".join(chunks).decode("utf-8")
+                    if not payload:
+                        continue
+                    response = self._evaluate_request(payload)
+                    connection.sendall(json.dumps(response).encode("utf-8"))
 
-                        full_data = b"".join(chunks).decode("utf-8")
-                        if not full_data:
-                            continue
-
-                        # Detect in_md header
-                        lines = full_data.splitlines(keepends=True)
-                        has_header = (
-                            lines
-                            and lines[0].startswith("in_md('")
-                            and "')" in lines[0]
-                        )
-
-                        data_to_run = "".join(lines[1:]) if has_header else full_data
-
-                        if has_header and not data_to_run.strip():
-                            # Header only, switch and return success
-                            stdout, stderr = io.StringIO(), io.StringIO()
-                            with stdout_redirector(stdout), stderr_redirector(stderr):
-                                match = re.search(r"in_md\('([^']+)'\)", lines[0])
-                                if match:
-                                    self.manager.in_md(match.group(1))
-                            response = {
-                                "stdout": stdout.getvalue(),
-                                "stderr": stderr.getvalue(),
-                                "success": True,
-                                "result": None,
-                            }
-                        else:
-                            stdout, stderr = io.StringIO(), io.StringIO()
-                            with stdout_redirector(stdout), stderr_redirector(stderr):
-                                if has_header:
-                                    match = re.search(r"in_md\('([^']+)'\)", lines[0])
-                                    if match:
-                                        self.manager.in_md(match.group(1))
-
-                                self.manager.pre_execute()
-                                ns = self.shell.user_ns
-
-                                try:
-                                    res = self.shell.run_cell(
-                                        data_to_run, store_history=False, silent=False
-                                    )
-                                    success = res.success
-                                    result_value = (
-                                        repr(res.result)
-                                        if res.result is not None
-                                        else None
-                                    )
-                                except Exception as e:
-                                    success = False
-                                    result_value = str(e)
-                                    print(f"Error: {e}")
-
-                            response = {
-                                "stdout": stdout.getvalue(),
-                                "stderr": stderr.getvalue(),
-                                "success": success,
-                                "result": result_value,
-                            }
-
-                        conn.sendall(json.dumps(response).encode("utf-8"))
-                    except Exception as e:
-                        print(f"Server Error: {e}")
+    def _evaluate_request(self, payload):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        success = False
+        result_value = None
+        error = None
+        try:
+            lines = payload.splitlines(keepends=True)
+            request = None
+            if lines and lines[0].startswith("DYNRA "):
+                request = json.loads(lines[0][len("DYNRA ") :])
+                code = "".join(lines[1:])
+            else:
+                code = payload
+            with stdout_redirector(stdout), stderr_redirector(stderr):
+                if request is not None:
+                    module = request["module"]
+                    if request.get("create"):
+                        self.manager.create_md(module)
+                    self.manager.in_md(module)
+                if code.strip():
+                    execution = self.manager.execute_code(code)
+                    success = execution.success
+                    result_value = (
+                        repr(execution.result)
+                        if execution.result is not None
+                        else None
+                    )
+                    if execution.error is not None:
+                        error = f"{type(execution.error).__name__}: {execution.error}"
+                else:
+                    success = True
+        except Exception as exception:
+            error = f"{type(exception).__name__}: {exception}"
+            with stderr_redirector(stderr):
+                print(error, file=sys.stderr)
+        return {
+            "stdout": stdout.getvalue(),
+            "stderr": stderr.getvalue(),
+            "success": success,
+            "result": result_value,
+            "error": error,
+        }
 
 
 @contextlib.contextmanager
@@ -134,8 +113,6 @@ def stderr_redirector(stream):
         sys.stderr = old_stderr
 
 
-import argparse
-
 
 def main():
     parser = argparse.ArgumentParser(description="Dynra REPL Server")
@@ -145,18 +122,9 @@ def main():
     args = parser.parse_args()
 
     manager = NamespaceManager()
-    builtins.md, builtins.in_md = manager.md, manager.in_md
-    builtins.ls_md = manager.ls_md
-    builtins.help_dynra = manager.help_dynra
-    builtins.dir_md = manager.dir_md
-    builtins.doc = manager.doc
-    builtins.source = manager.source
-    builtins.find_var = manager.find_var
-
-    sys.path.insert(0, os.getcwd())
 
     app = TerminalIPythonApp.instance()
-    app.initialize(argv=[])
+    app.initialize(argv=["--TerminalInteractiveShell.colors=NoColor"])
 
     shell = app.shell
     shell.colors = "NoColor"  # Disable ANSI colors

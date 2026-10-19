@@ -23,12 +23,12 @@ def test_live_patching_via_cli():
             return output
 
         # 1. Setup mod_a with a function
-        run_client('md("mod_a")', "Create mod_a")
+        run_client('create_md("mod_a")', "Create mod_a")
         run_client('in_md("mod_a")', "Enter mod_a")
         run_client('def foo(): return 1', "Define foo() -> 1")
         
         # 2. Setup mod_b and IMPORT foo from mod_a
-        run_client('md("mod_b")', "Create mod_b")
+        run_client('create_md("mod_b")', "Create mod_b")
         run_client('in_md("mod_b")', "Enter mod_b")
         run_client('from mod_a import foo', "Import foo FROM mod_a")
         output_1 = run_client('foo()', "Check foo() in mod_b")

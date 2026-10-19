@@ -19,12 +19,14 @@ def test_single_tool_agent_workflow():
         response = dynra_repl(
             module="agent_lib",
             code="def get_value(): return 1",
+            create=True,
         )
         assert response["success"]
 
         response = dynra_repl(
             module="agent_app",
             code="from agent_lib import get_value",
+            create=True,
         )
         assert response["success"]
         response = dynra_repl(module="agent_app", code="get_value()")

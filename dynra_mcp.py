@@ -34,7 +34,7 @@ def send_code(code: str, host="127.0.0.1", port=9999, timeout=30.0):
 
 
 def _tool_response(response, module):
-    if "error" in response:
+    if "error" in response and response.get("error") and "success" not in response:
         return {
             "success": False,
             "module": module,
@@ -44,25 +44,27 @@ def _tool_response(response, module):
             "error": response["error"],
         }
 
+    success = bool(response.get("success"))
     return {
-        "success": bool(response.get("success")),
+        "success": success,
         "module": module,
         "result": response.get("result"),
         "stdout": response.get("stdout", ""),
         "stderr": response.get("stderr", ""),
-        "error": None if response.get("success") else "Python execution failed.",
+        "error": None
+        if success
+        else response.get("error") or "Python execution failed.",
     }
 
 
 @mcp.tool()
-def dynra_repl(code: str, module: str = "user") -> dict:
+def dynra_repl(code: str, module: str = "user", create: bool = False) -> dict:
     """Evaluate Python in a persistent live module.
 
-    This is Dynra's complete interface for coding agents. Use it to inspect
-    runtime state, reproduce behavior, redefine functions or classes, and
-    verify changes without restarting Python. Always pass the owning module
-    when editing project code. Send complete top-level definitions for live
-    patches. State persists between calls.
+    Pass the owning project module when inspecting or patching source. Imports
+    are strict: failures are returned instead of creating empty namespaces.
+    Set ``create=True`` only when intentionally creating a synthetic scratch
+    module. State persists between calls.
     """
     if not _MODULE_NAME.fullmatch(module):
         return {
@@ -83,7 +85,10 @@ def dynra_repl(code: str, module: str = "user") -> dict:
             "error": "Code must not be empty.",
         }
 
-    response = send_code(f"in_md('{module}')\n{code}")
+    header = json.dumps(
+        {"module": module, "create": create}, separators=(",", ":")
+    )
+    response = send_code(f"DYNRA {header}\n{code}")
     return _tool_response(response, module)
 
 

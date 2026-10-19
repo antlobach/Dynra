@@ -7,8 +7,8 @@ def test_imported_function_reference_is_patched_in_place():
     manager = NamespaceManager()
     origin_name = "dynra_test_origin"
     consumer_name = "dynra_test_consumer"
-    origin = manager.md(origin_name)
-    consumer = manager.md(consumer_name)
+    origin = manager.create_md(origin_name)
+    consumer = manager.create_md(consumer_name)
 
     try:
         exec("def value(): return 1", origin.__dict__)

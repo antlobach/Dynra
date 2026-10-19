@@ -11,6 +11,10 @@
   <code>Python 3.10+</code> · <code>Model Context Protocol</code> · <code>State-preserving patches</code> · <code>IPython runtime</code>
 </p>
 
+<p align="center">
+  <a href="https://deepwiki.com/antlobach/Dynra"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+</p>
+
 ## Give coding agents a live Python process
 
 Most coding agents work indirectly: edit files, restart Python, reconstruct fixtures, reproduce the bug, and repeat. Every restart discards useful runtime context—loaded data, object graphs, caches, active sessions, and the exact state that exposed a failure.
@@ -41,14 +45,20 @@ flowchart LR
 
 ## Agent quick start
 
-Clone and start the trusted local runtime:
+Clone Dynra, then start it from the target project's root with the target
+project's interpreter:
 
 ```bash
-git clone https://github.com/antlobach/Dynra.git
-cd Dynra
+git clone https://github.com/antlobach/Dynra.git /path/to/Dynra
+cd /path/to/target-project
 uv sync
-uv run dynra
+uv pip install --python .venv/bin/python /path/to/Dynra
+.venv/bin/dynra
 ```
+
+Starting at the target root is significant. Dynra reads `pyproject.toml`, recognizes
+conventional and configured source roots such as `src/`, and indexes project modules
+without importing them.
 
 Configure Dynra in an MCP-compatible coding agent, replacing the path with your clone:
 
@@ -76,10 +86,14 @@ The MCP adapter connects to the running process at `127.0.0.1:9999`.
 Dynra exposes one general interface:
 
 ```text
-dynra_repl(code, module="user")
+dynra_repl(code, module="user", create=False)
 ```
 
-The agent uses the same tool to inspect state, reproduce behavior, redefine functions or classes, and verify results. `module` makes namespace selection atomic, so calls never depend on a previously selected module. The response is structured with `success`, `module`, `result`, `stdout`, `stderr`, and `error`.
+The agent uses the same tool to inspect state, reproduce behavior, redefine functions
+or classes, and verify results. `module` selection is atomic. Imports are strict:
+missing modules and import-time dependency failures are returned as errors. Set
+`create=True` only when intentionally creating a synthetic scratch module. The
+response contains `success`, `module`, `result`, `stdout`, `stderr`, and `error`.
 
 ## A complete agent live-coding loop
 
@@ -88,7 +102,8 @@ Assume an agent is debugging pricing behavior. It creates a live library module:
 ```text
 dynra_repl(
   module="pricing",
-  code="def price(sku):\n    return {'book': 20}[sku]"
+  code="def price(sku):\n    return {'book': 20}[sku]",
+  create=True,
 )
 ```
 
@@ -97,7 +112,8 @@ It creates a consumer with state and an imported function reference:
 ```text
 dynra_repl(
   module="checkout",
-  code="from pricing import price\ncart = ['book']\ndef total():\n    return sum(price(sku) for sku in cart)"
+  code="from pricing import price\ncart = ['book']\ndef total():\n    return sum(price(sku) for sku in cart)",
+  create=True,
 )
 
 dynra_repl(module="checkout", code="total()")
@@ -143,12 +159,20 @@ Dynra is a runtime laboratory, not a replacement for source control or tests. A 
 ## Runtime model
 
 - One long-lived IPython process owns the live state.
-- `md(name)` creates or returns a module namespace.
-- `in_md(name)` imports or creates a module and makes it active.
-- Function redefinitions update compatible imported function objects in place.
-- Class redefinitions update compatible methods and class attributes.
+- Project modules are discovered statically from the repository and `pyproject.toml`.
+- `require_md(name)` imports an existing namespace and preserves import errors.
+- `create_md(name)` explicitly creates a synthetic namespace.
+- `in_md(name)` enters an existing real or synthetic namespace.
+- Remote evaluations reconcile each top-level definition before evaluating the next
+  statement.
+- Compatible function and class redefinitions retain one canonical object identity.
 - Existing instances can migrate state through `__dynra_update__`.
-- Safe class mode refuses known-incompatible metaclass, base-class, and `__slots__` changes.
+- Re-evaluating an existing decorated definition updates its body without running its
+  registration decorators again.
+- A refused definition in a multi-definition evaluation rolls the definition changes
+  back as a unit.
+- Imported application modules are not populated with Dynra command names; commands
+  are supplied through the REPL builtins.
 
 ## Class evolution
 
@@ -171,39 +195,56 @@ After a compatible patch, existing `Session` instances receive the new method an
 
 ## Human interfaces
 
-The agent workflow is the primary interface. Dynra also includes:
+Dynra includes:
 
 - `dynra_client.py` for one-off terminal evaluations.
-- `dynra.el` for CIDER-inspired Emacs interaction.
-- `dynra_extension.py` for IPython/Jupyter integration.
+- `dynra_extension.py` for IPython integration.
 - A direct interactive REPL through `uv run dynra`.
+
+`dynra_client.py` can select a namespace atomically:
+
+```bash
+python /path/to/Dynra/dynra_client.py --module package.module "expression"
+python /path/to/Dynra/dynra_client.py --module scratch --create "value = 1"
+```
 
 Runtime commands:
 
 | Command | Purpose |
 | --- | --- |
-| `md(name)` | Create or return a REPL module without entering it. |
-| `in_md(name)` | Import or create a module, then make it active. |
-| `ls_md()` | List live REPL and project modules. |
-| `dir_md(module=None)` | List public symbols. |
-| `doc(obj)` | Show documentation. |
-| `source(obj)` | Show source when available. |
+| `create_md(name)` | Explicitly create a synthetic REPL module. |
+| `require_md(name)` | Import a real module and surface its complete import error. |
+| `in_md(name)` | Enter an existing real or synthetic module. |
+| `ls_md()` | Separate discovered, loaded-project, synthetic, and external modules. |
+| `dir_md(module=None)` | List symbols, including static inspection of unloaded project modules. |
+| `doc(obj)` / `source(obj)` | Show documentation or live source. |
 | `find_var(pattern)` | Search loaded modules for matching symbol names. |
+| `function_patch_mode(mode=None)` | Read or set `safe` / `permissive` function patching. |
 | `class_patch_mode(mode=None)` | Read or set `safe` / `permissive` class patching. |
+| `unmap(name)` | Delete a binding and report remaining direct holders. |
+| `patch_log()` | Show applied, refused, reverted, and persisted operations. |
+| `revert(target)` / `revert_all()` | Restore one or all live definition snapshots. |
+| `diverged()` | Show unified diffs between live definitions and source files. |
+| `source_patch()` | Return the current live-versus-disk unified diffs. |
+| `persist_source(target=None)` | Write the exact evaluated definition source to disk. |
 | `help_dynra()` | Show runtime help. |
-
-Send terminal evaluations from a second shell:
-
-```bash
-uv run python dynra_client.py "1 + 1"
-uv run python dynra_client.py -f path/to/change.py
-```
 
 ## Current status and safety
 
-Dynra is experimental. It executes arbitrary Python by design and is intended only for trusted local development. Do not expose its TCP port to untrusted users or networks, and do not let untrusted agents access the MCP server.
+Dynra executes arbitrary Python by design and is intended only for trusted local
+development. Do not expose its TCP port to untrusted users or networks, and do not let
+untrusted agents access the MCP server.
 
-Some changes cannot be made safely in place. Process configuration, native extension state, incompatible closure layouts, and side effects outside Python memory may require a restart. Safe class mode rejects known incompatible class-shape changes rather than pretending they worked.
+Safe function mode refuses incompatible closure-layout or sync/async changes when old
+objects have direct holders. Safe class mode refuses incompatible metaclass, base-class,
+and `__slots__` changes. Compatible redefinitions preserve identity for prior imports,
+registries, partials, closures, and existing instances.
+
+Definition transactions restore changed definitions after a refusal or evaluation
+failure. They cannot undo arbitrary external side effects performed by ordinary
+statements or a first-time decorator. Existing decorators are therefore not rerun
+during redefinition. Process configuration, native extension state, and incompatible
+runtime changes can still require a restart.
 
 ## License
 

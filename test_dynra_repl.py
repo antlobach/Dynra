@@ -49,7 +49,7 @@ def test_repl_autoreload_and_namespaces(tmp_path):
         child.expect_exact("100")
         child.expect(r"pkg.mod_b> ")
 
-        child.sendline('md("temp")')
+        child.sendline('create_md("temp")')
         child.expect(r"module 'temp'")
         child.expect(r"pkg.mod_b> ")
         child.sendline('in_md("temp")')
