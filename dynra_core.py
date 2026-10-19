@@ -248,6 +248,10 @@ class ManagedExecutionResult:
     error: BaseException | None = None
 
 
+class SourceConflictError(RuntimeError):
+    """A source write would overwrite a definition changed outside Dynra."""
+
+
 class NamespaceManager:
     def __init__(self, shell=None, project_root=None):
         self.shell = shell
@@ -262,6 +266,13 @@ class NamespaceManager:
         self.history: list[dict] = []
         self._undo_stacks: dict[tuple[str, str], list[DefinitionSnapshot]] = {}
         self._live_sources: dict[tuple[str, str], str | None] = {}
+        self._source_bases: dict[tuple[str, str], str | None] = {}
+        self._source_snapshots: dict[str, dict[str, str]] = {}
+        self._source_signatures: dict[str, tuple[int, int, int]] = {}
+        self._source_conflicts: dict[str, tuple[str, ...]] = {}
+        self._module_generations: dict[str, int] = {}
+        self.last_source_sync: dict = {}
+        self._reconciling_source = False
         self._sequence = 0
         self._active_snapshot: DefinitionSnapshot | None = None
         self._pending_source: str | None = None
@@ -290,6 +301,7 @@ class NamespaceManager:
             "diverged": self.diverged,
             "source_patch": self.source_patch,
             "persist_source": self.persist_source,
+            "source_sync_status": self.source_sync_status,
         }
 
     def install_commands(self):
@@ -356,6 +368,7 @@ class NamespaceManager:
 
     def in_md(self, name):
         """Enter a loaded, discoverable, or importable module."""
+        already_tracked = name in self._source_snapshots
         mod = self.require_md(name)
         self.current_name = name
         if self.shell:
@@ -363,7 +376,195 @@ class NamespaceManager:
             self.shell.user_ns = mod.__dict__
             self.shell.user_module = mod
             print(f"Switched to module '{name}'")
+        if already_tracked:
+            self.last_source_sync = self.reconcile_module_source(name)
+            if self.shell:
+                self._init_ipython_ns(mod.__dict__)
+                self.shell.user_ns = mod.__dict__
+                self.shell.user_module = mod
+        else:
+            self._remember_module_source(name)
+            self.last_source_sync = self.source_sync_status(name)
         return mod
+
+    def module_generation(self, name=None):
+        return self._module_generations.get(name or self.current_name, 0)
+
+    def _bump_module_generation(self, name):
+        generation = self._module_generations.get(name, 0) + 1
+        self._module_generations[name] = generation
+        return generation
+
+    @staticmethod
+    def _file_signature(path):
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size, getattr(stat, "st_ino", 0)
+
+    def _read_module_definitions(self, name):
+        info = self.project.modules.get(name)
+        if info is None:
+            return None, {}
+        text = info.path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        definitions = {
+            node.name: self._statement_source(text, node)
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+        return info.path, definitions
+
+    def _remember_module_source(self, name):
+        path, definitions = self._read_module_definitions(name)
+        if path is None:
+            return
+        self._source_snapshots[name] = definitions
+        self._source_signatures[name] = self._file_signature(path)
+        self._source_conflicts.pop(name, None)
+
+    def source_sync_status(self, module=None):
+        name = module or self.current_name
+        conflicts = self._source_conflicts.get(name, ())
+        live = tuple(
+            sorted(
+                f"{mod}.{definition}"
+                for mod, definition in self._live_sources
+                if mod == name
+            )
+        )
+        status = "conflict" if conflicts else "live-newer" if live else "clean"
+        return {
+            "module": name,
+            "generation": self.module_generation(name),
+            "status": status,
+            "conflicts": conflicts,
+            "live": live,
+            "changes": (),
+        }
+
+    def _remove_module_bindings(self, origin, obj):
+        removed = []
+        for module_name, module in list(sys.modules.items()):
+            if not isinstance(module, types.ModuleType):
+                continue
+            for attr, value in list(module.__dict__.items()):
+                if value is obj and getattr(value, "__module__", None) == origin:
+                    del module.__dict__[attr]
+                    removed.append(f"{module_name}.{attr}")
+        return tuple(sorted(removed))
+
+    def reconcile_module_source(self, name=None):
+        """Apply external top-level definition edits to a loaded module."""
+        module_name = name or self.current_name
+        info = self.project.modules.get(module_name)
+        if info is None or module_name not in sys.modules:
+            return self.source_sync_status(module_name)
+        try:
+            signature = self._file_signature(info.path)
+            if (
+                self._source_signatures.get(module_name) == signature
+                and module_name not in self._source_conflicts
+            ):
+                return self.source_sync_status(module_name)
+            _, disk = self._read_module_definitions(module_name)
+        except (OSError, SyntaxError, UnicodeError) as error:
+            report = self.source_sync_status(module_name)
+            report.update(status="error", error=f"{type(error).__name__}: {error}")
+            return report
+
+        base = self._source_snapshots.get(module_name, {})
+        changed_names = {
+            definition
+            for definition in set(base) | set(disk)
+            if not self._same_definition(base.get(definition), disk.get(definition))
+        }
+        changes = []
+        conflicts = []
+        self._reconciling_source = True
+        try:
+            for definition in sorted(changed_names):
+                key = (module_name, definition)
+                disk_source = disk.get(definition)
+                live_source = self._live_sources.get(key, base.get(definition))
+                if key in self._live_sources and not self._same_definition(
+                    live_source, disk_source
+                ):
+                    conflicts.append(f"{module_name}.{definition}")
+                    continue
+                if disk_source is None:
+                    obj = sys.modules[module_name].__dict__.get(definition)
+                    removed = (
+                        self._remove_module_bindings(module_name, obj)
+                        if isinstance(obj, (types.FunctionType, type))
+                        else ()
+                    )
+                    changes.append(
+                        {
+                            "definition": f"{module_name}.{definition}",
+                            "action": "removed",
+                            "bindings": removed,
+                        }
+                    )
+                    continue
+                if not self.shell:
+                    conflicts.append(f"{module_name}.{definition}")
+                    continue
+                result = self.execute_code(disk_source)
+                if not result.success:
+                    conflicts.append(f"{module_name}.{definition}")
+                    continue
+                changes.append(
+                    {
+                        "definition": f"{module_name}.{definition}",
+                        "action": "added"
+                        if definition not in base
+                        else "updated",
+                    }
+                )
+        finally:
+            self._reconciling_source = False
+
+        if changes:
+            self._bump_module_generation(module_name)
+            hook = sys.modules[module_name].__dict__.get("__dynra_reconcile__")
+            if callable(hook):
+                try:
+                    hook(tuple(dict(change) for change in changes))
+                except Exception as error:
+                    changes.append(
+                        {
+                            "definition": f"{module_name}.__dynra_reconcile__",
+                            "action": "hook-error",
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    )
+
+        snapshot = dict(base)
+        for definition in changed_names:
+            if f"{module_name}.{definition}" in conflicts:
+                continue
+            if definition in disk:
+                snapshot[definition] = disk[definition]
+            else:
+                snapshot.pop(definition, None)
+            key = (module_name, definition)
+            self._live_sources.pop(key, None)
+            self._source_bases.pop(key, None)
+            self._undo_stacks.pop(key, None)
+        self._source_snapshots[module_name] = snapshot
+        self._source_signatures[module_name] = signature
+        if conflicts:
+            self._source_conflicts[module_name] = tuple(sorted(conflicts))
+        else:
+            self._source_conflicts.pop(module_name, None)
+        status = "conflict" if conflicts else "healed" if changes else "clean"
+        return {
+            "module": module_name,
+            "generation": self.module_generation(module_name),
+            "status": status,
+            "conflicts": tuple(sorted(conflicts)),
+            "live": self.source_sync_status(module_name)["live"],
+            "changes": tuple(changes),
+        }
 
     def module_catalog(self):
         discovered = set(self.project.modules)
@@ -478,12 +679,15 @@ class NamespaceManager:
   diverged()               - Show live definitions that differ from disk
   source_patch()           - Emit unified diffs for live changes
   persist_source([target]) - Write exact live definitions back to source
+  source_sync_status()     - Show source freshness and module generation
 """
         )
 
     def pre_execute(self):
         if not self.shell:
             return
+        if not self._reconciling_source:
+            self.last_source_sync = self.reconcile_module_source()
         namespace = self.shell.user_ns
         self.prev_ns_snapshot = {name: id(value) for name, value in namespace.items()}
         self.prev_objects = dict(namespace)
@@ -612,12 +816,28 @@ class NamespaceManager:
         else:
             self._live_sources[key] = snapshot.source
 
+    def _clear_synced_live_source(self, module, name):
+        key = (module, name)
+        if key not in self._live_sources:
+            return
+        disk_source = self._disk_definition(module, name)[0]
+        if self._same_definition(self._live_sources[key], disk_source):
+            self._live_sources.pop(key, None)
+            self._source_bases.pop(key, None)
+
     def _record_change(self, action, before, source):
+        if self._reconciling_source:
+            return
         self._sequence += 1
         before.sequence = self._sequence
         key = (before.module, before.name)
+        if key not in self._source_bases:
+            self._source_bases[key] = self._disk_definition(
+                before.module, before.name
+            )[0]
         self._undo_stacks.setdefault(key, []).append(before)
         self._live_sources[key] = source
+        self._bump_module_generation(before.module)
         self.history.append(
             {
                 "sequence": self._sequence,
@@ -756,6 +976,8 @@ class NamespaceManager:
         history_length = len(self.history)
         undo_lengths = {key: len(stack) for key, stack in self._undo_stacks.items()}
         live_sources = dict(self._live_sources)
+        source_bases = dict(self._source_bases)
+        module_generations = dict(self._module_generations)
         last_result = None
 
         for node in tree.body:
@@ -790,6 +1012,8 @@ class NamespaceManager:
                     if not self._undo_stacks[key]:
                         del self._undo_stacks[key]
                 self._live_sources = live_sources
+                self._source_bases = source_bases
+                self._module_generations = module_generations
                 self._record_event(
                     "transaction",
                     module_name,
@@ -870,8 +1094,10 @@ class NamespaceManager:
             raise KeyError(f"No live change to revert for {module}.{name}")
         snapshot = stack.pop()
         self._restore_snapshot(snapshot)
+        self._clear_synced_live_source(module, name)
         if not stack:
             self._undo_stacks.pop(key, None)
+        self._bump_module_generation(module)
         self._record_event("revert", module, name)
         return sys.modules[module].__dict__.get(name)
 
@@ -883,8 +1109,10 @@ class NamespaceManager:
             )
             snapshot = stack.pop()
             self._restore_snapshot(snapshot)
+            self._clear_synced_live_source(snapshot.module, snapshot.name)
             if not stack:
                 del self._undo_stacks[key]
+            self._bump_module_generation(snapshot.module)
             self._record_event("revert", snapshot.module, snapshot.name)
             count += 1
         print(f"Reverted {count} live change(s).")
@@ -899,10 +1127,15 @@ class NamespaceManager:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if node.name == name:
+                    start = (
+                        node.decorator_list[0].lineno
+                        if node.decorator_list
+                        else node.lineno
+                    )
                     return (
-                        ast.get_source_segment(text, node),
+                        self._statement_source(text, node),
                         info.path,
-                        (node.lineno, node.end_lineno),
+                        (start, node.end_lineno),
                     )
         return None, info.path, None
 
@@ -949,9 +1182,15 @@ class NamespaceManager:
             if selected is not None and key != selected:
                 continue
             module, name = key
-            _, path, lines = self._disk_definition(module, name)
+            disk_source, path, lines = self._disk_definition(module, name)
             if path is None:
                 raise ValueError(f"{module}.{name} has no project source file")
+            base_source = self._source_bases.get(key, disk_source)
+            if not self._same_definition(disk_source, base_source):
+                raise SourceConflictError(
+                    f"Refusing to overwrite externally changed definition "
+                    f"{module}.{name}"
+                )
             changes.append((path, lines, live_source, module, name))
 
         by_path = {}
@@ -978,8 +1217,12 @@ class NamespaceManager:
                 persisted.append(f"{module}.{name}")
                 self._record_event("persist", module, name, str(path))
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        persisted_modules = {module for _, _, _, module, _ in changes}
         for key in list(self._live_sources):
             if selected is None or key == selected:
                 self._live_sources.pop(key, None)
+                self._source_bases.pop(key, None)
+        for module in persisted_modules:
+            self._remember_module_source(module)
         print("Persisted:", ", ".join(sorted(persisted)) or "(none)")
         return tuple(sorted(persisted))

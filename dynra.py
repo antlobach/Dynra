@@ -54,6 +54,7 @@ class DynraServer(threading.Thread):
         success = False
         result_value = None
         error = None
+        source_sync = self.manager.source_sync_status()
         try:
             lines = payload.splitlines(keepends=True)
             request = None
@@ -68,6 +69,9 @@ class DynraServer(threading.Thread):
                     if request.get("create"):
                         self.manager.create_md(module)
                     self.manager.in_md(module)
+                    source_sync = self.manager.last_source_sync
+                else:
+                    source_sync = self.manager.reconcile_module_source()
                 if code.strip():
                     execution = self.manager.execute_code(code)
                     success = execution.success
@@ -84,12 +88,23 @@ class DynraServer(threading.Thread):
             error = f"{type(exception).__name__}: {exception}"
             with stderr_redirector(stderr):
                 print(error, file=sys.stderr)
+        latest_sync = self.manager.source_sync_status()
+        if source_sync.get("changes"):
+            latest_sync["changes"] = source_sync["changes"]
+            if latest_sync["status"] == "clean":
+                latest_sync["status"] = "healed"
+        if source_sync.get("error"):
+            latest_sync["status"] = "error"
+            latest_sync["error"] = source_sync["error"]
+        source_sync = latest_sync
         return {
             "stdout": stdout.getvalue(),
             "stderr": stderr.getvalue(),
             "success": success,
             "result": result_value,
             "error": error,
+            "generation": self.manager.module_generation(),
+            "source_sync": source_sync,
         }
 
 

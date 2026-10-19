@@ -37,6 +37,8 @@ def test_single_tool_agent_workflow():
         assert response["success"]
         assert response["module"] == "user"
         assert response["result"] == "2"
+        assert response["generation"] == 0
+        assert response["source_sync"]["status"] == "clean"
 
         response = dynra_repl(
             module="agent_lib",
@@ -44,6 +46,8 @@ def test_single_tool_agent_workflow():
             create=True,
         )
         assert response["success"]
+        assert response["generation"] == 1
+        assert response["source_sync"]["status"] == "live-newer"
 
         response = dynra_repl(
             module="agent_app",
