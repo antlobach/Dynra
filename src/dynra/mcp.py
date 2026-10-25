@@ -192,6 +192,21 @@ def dynra_events(
 
 
 @mcp.tool()
+def dynra_lifecycle_plan(
+    definitions: list[str],
+    runtime: str = "",
+    port: int = 9999,
+) -> dict:
+    """Plan lifecycle impact without mutating the runtime."""
+    return _control(
+        "lifecycle_plan",
+        runtime=runtime,
+        port=port,
+        definitions=definitions,
+    )
+
+
+@mcp.tool()
 def dynra_bootstrap(
     force: bool = False, runtime: str = "", port: int = 9999
 ) -> dict:
@@ -202,9 +217,34 @@ def dynra_bootstrap(
 
 
 @mcp.tool()
+def dynra_lifecycle_reconcile(
+    definitions: list[str],
+    source_before: dict[str, str] | None = None,
+    source_after: dict[str, str] | None = None,
+    runtime: str = "",
+    port: int = 9999,
+) -> dict:
+    """Execute an adapter-managed transactional lifecycle reconciliation."""
+    return _control(
+        "lifecycle_reconcile",
+        runtime=runtime,
+        port=port,
+        definitions=definitions,
+        source_before=source_before or {},
+        source_after=source_after or {},
+    )
+
+
+@mcp.tool()
 def dynra_bootstrap_status(runtime: str = "", port: int = 9999) -> dict:
     """Return configured bootstrap state without starting the application."""
     return _control("bootstrap_status", runtime=runtime, port=port)
+
+
+@mcp.tool()
+def dynra_lifecycle_journal(runtime: str = "", port: int = 9999) -> dict:
+    """Read lifecycle plans, swap points, outcomes, and recovery state."""
+    return _control("lifecycle_journal", runtime=runtime, port=port)
 
 
 @mcp.tool()

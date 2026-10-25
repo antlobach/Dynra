@@ -285,6 +285,41 @@ dynra-client --module package.module "expression"
 dynra-client --module scratch --create "value = 1"
 ```
 
+## Optional lifecycle adapters
+
+Dynra remains a development dependency. Production modules do not import Dynra,
+use proxy domain values, or decorate handlers. Optional development packages
+publish adapters through the `dynra.adapters` entry-point group:
+
+```toml
+[project.entry-points."dynra.adapters"]
+example = "dynra_example:adapter"
+```
+
+Adapters register watched components and explicit lifecycle operations. Dynra
+builds a deterministic impact plan before mutation, prepares and validates
+replacements before an atomic holder swap, and compensates after post-swap
+failure. Missing operations, unmanaged holders, dependency cycles, restart-only
+bindings, and tasks without a compatible supervision policy are refused with
+machine-readable evidence.
+
+The adapter API is exported from `dynra`: `ComponentAdapter`, `ChangeSet`,
+`LifecycleRuntime`, `ManagedHolder`, `RuntimeGraph`, `TaskSupervisor`,
+`TaskPolicy`, `BindingKind`, and `migrate_instances`.
+
+Agents can inspect and operate lifecycle reconciliation without evaluating
+arbitrary helper code:
+
+```text
+dynra_lifecycle_plan(definitions, runtime="", port=9999)
+dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtime="", port=9999)
+dynra_lifecycle_journal(runtime="", port=9999)
+```
+
+`dynra_lifecycle_plan` never mutates runtime state. The journal records source
+hashes, preparation, the atomic swap point, cleanup, compensation, and recovery
+state. Concrete framework semantics belong in separate optional packages.
+
 ## Security
 
 Dynra executes arbitrary Python by design. Use it only for trusted local development. Do not expose its TCP port to untrusted networks, and do not grant untrusted agents access to the MCP server.

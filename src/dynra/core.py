@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from .project import ProjectLayout
+from .lifecycle import LifecycleRuntime, discover_adapters
 
 #: CPython flag marking a code object as a coroutine.
 CO_COROUTINE = 0x0080
@@ -302,6 +303,12 @@ class NamespaceManager:
         self._patch_refused = False
         self._bootstrap_result: dict | None = None
         self._bootstrap_attempts = 0
+        self.lifecycle = LifecycleRuntime()
+        self.adapters = discover_adapters()
+        for adapter in self.adapters:
+            components = getattr(adapter, "components", (adapter,))
+            for component in components:
+                self.lifecycle.register_component(component)
         self.create_md("user")
         self.install_commands()
 
