@@ -57,8 +57,18 @@ def _compact_source_sync(source_sync, selected_module):
     conflicts = source_sync.get("conflicts") or ()
     live = source_sync.get("live") or ()
     changes = source_sync.get("changes") or ()
+    outcomes = source_sync.get("outcomes") or ()
+    restart_required = source_sync.get("restart_required") or ()
     error = source_sync.get("error")
-    if status == "clean" and not conflicts and not live and not changes and not error:
+    if (
+        status == "clean"
+        and not conflicts
+        and not live
+        and not changes
+        and not outcomes
+        and not restart_required
+        and not error
+    ):
         return None
 
     compact = {"status": status}
@@ -74,6 +84,10 @@ def _compact_source_sync(source_sync, selected_module):
         compact["live"] = live
     if changes:
         compact["changes"] = changes
+    if outcomes:
+        compact["outcomes"] = outcomes
+    if restart_required:
+        compact["restart_required"] = restart_required
     if error:
         compact["error"] = error
     return compact
@@ -159,6 +173,38 @@ def dynra_revert(target: str, runtime: str = "", port: int = 9999) -> dict:
 def dynra_patch_log(runtime: str = "", port: int = 9999) -> dict:
     """Return the runtime's structured patch and persistence history."""
     return _control("patch_log", runtime=runtime, port=port)
+
+@mcp.tool()
+def dynra_events(
+    after: int = 0,
+    limit: int | None = None,
+    runtime: str = "",
+    port: int = 9999,
+) -> dict:
+    """Read append-only runtime events after a sequence cursor."""
+    return _control(
+        "events",
+        runtime=runtime,
+        port=port,
+        after=after,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+def dynra_bootstrap(
+    force: bool = False, runtime: str = "", port: int = 9999
+) -> dict:
+    """Explicitly run the project's configured bootstrap target."""
+    return _control(
+        "bootstrap", runtime=runtime, port=port, force=force
+    )
+
+
+@mcp.tool()
+def dynra_bootstrap_status(runtime: str = "", port: int = 9999) -> dict:
+    """Return configured bootstrap state without starting the application."""
+    return _control("bootstrap_status", runtime=runtime, port=port)
 
 
 @mcp.tool()

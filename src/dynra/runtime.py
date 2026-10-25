@@ -157,6 +157,17 @@ class DynraServer(threading.Thread):
                 return f"{module}.{name}"
             if operation == "patch_log":
                 return list(self.manager.patch_log())
+            if operation == "events":
+                return list(
+                    self.manager.events(
+                        after=request.get("after", 0),
+                        limit=request.get("limit"),
+                    )
+                )
+            if operation == "bootstrap":
+                return self.manager.bootstrap(force=request.get("force", False))
+            if operation == "bootstrap_status":
+                return self.manager.bootstrap_status()
         raise ValueError(f"Unknown structured operation: {operation!r}.")
 
     def _control_request(self, request):
@@ -246,10 +257,11 @@ class DynraServer(threading.Thread):
             with stderr_redirector(stderr):
                 print(error, file=sys.stderr)
         latest_sync = self.manager.source_sync_status()
-        if source_sync.get("changes"):
-            latest_sync["changes"] = source_sync["changes"]
-            if latest_sync["status"] == "clean":
-                latest_sync["status"] = "healed"
+        for field in ("changes", "conflicts", "outcomes", "restart_required"):
+            if source_sync.get(field):
+                latest_sync[field] = source_sync[field]
+        if source_sync.get("status") != "clean":
+            latest_sync["status"] = source_sync["status"]
         if source_sync.get("error"):
             latest_sync["status"] = "error"
             latest_sync["error"] = source_sync["error"]

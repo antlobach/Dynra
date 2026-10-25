@@ -4,9 +4,12 @@ import sys
 import pexpect
 
 from dynra.mcp import (
+    dynra_bootstrap,
+    dynra_bootstrap_status,
     dynra_diff,
     dynra_evaluate,
     dynra_modules,
+    dynra_events,
     dynra_patch_log,
     dynra_persist,
     dynra_repl,
@@ -141,6 +144,14 @@ def test_structured_runtime_tools(tmp_path):
         "def value():\n    return 1\n",
         encoding="utf-8",
     )
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.dynra]\nbootstrap = 'pkg.boot:load'\n",
+        encoding="utf-8",
+    )
+    (package / "boot.py").write_text(
+        "def load(namespace):\n    return {'booted': 42}\n",
+        encoding="utf-8",
+    )
     port = free_ports(1)[0]
     server = pexpect.spawn(
         sys.executable,
@@ -158,6 +169,10 @@ def test_structured_runtime_tools(tmp_path):
         assert "pkg.mod" in modules["result"]["discovered"]
         assert dynra_symbols("pkg.mod", port=port)["result"] == ["value"]
         assert "def value()" in dynra_source("pkg.mod.value", port=port)["result"]
+        bootstrap_status = dynra_bootstrap_status(port=port)
+        assert bootstrap_status["result"]["completed"] is False
+        assert dynra_bootstrap(port=port)["result"]["completed"] is True
+        assert dynra_evaluate(code="booted", port=port)["result"] == "42"
 
         patched = dynra_evaluate(
             module="pkg.mod",
@@ -167,6 +182,10 @@ def test_structured_runtime_tools(tmp_path):
         assert patched["success"] is True
         assert "pkg.mod.value" in dynra_diff(port=port)["result"]
         assert dynra_patch_log(port=port)["result"][-1]["action"] == "patch"
+        events = dynra_events(port=port)
+        assert events["result"][-1]["action"] == "patch"
+        cursor = events["result"][-1]["sequence"]
+        assert dynra_events(after=cursor, port=port)["result"] == []
 
         reverted = dynra_revert("pkg.mod.value", port=port)
         assert reverted["result"] == "pkg.mod.value"
