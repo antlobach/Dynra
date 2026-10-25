@@ -74,7 +74,7 @@ selection is available.
 | Read patch history | `dynra_patch_log(runtime)` | Use when definition state is unclear. |
 | Undo | `dynra_revert(target, runtime)` | Revert failed hypotheses before trying another. |
 | Save | `dynra_persist(target, runtime)` | Persist only a behaviorally verified definition. |
-| Plan resource work | `dynra_lifecycle_plan(definitions, runtime)` | No mutation. Inspect safety, restart flag, affected/preserved components, unmanaged holders, and refusals. |
+| Plan resource work | `dynra_lifecycle_plan(definitions, source_before, source_after, runtime)` | Pass the same source maps intended for reconcile. No mutation; inspect safety, restart flag, affected/preserved components, unmanaged holders, and refusals. |
 | Reconcile resources | `dynra_lifecycle_reconcile(...)` | Call only for a safe plan backed by adapters. |
 | Recover lifecycle state | `dynra_lifecycle_journal(runtime)` | Inspect swap, cleanup, compensation, and recovery state before further mutation. |
 
@@ -97,9 +97,9 @@ status call after every clean evaluation.
 4. **Read and reproduce.** Use `dynra_source`, then evaluate a focused expression
    through the real loaded consumer. Record the current event cursor when later
    attribution matters.
-5. **Patch the owner.** Send the complete top-level function or class definition
-   to its owning module. Patch one logical definition at a time unless several
-   definitions must form one transaction.
+5. **Patch the owner.** Send one complete top-level function or class definition
+   to its owning module. Patch one definition at a time; ordinary Python readers
+   cannot observe sequential multi-definition publication atomically.
 6. **Verify through retained references.** Exercise prior imports, instances,
    routes, callback registries, clients, or tasks. A direct call to the new
    definition alone is insufficient when the bug is in integration state.
@@ -157,8 +157,10 @@ status call after every clean evaluation.
 
 Lifecycle support is optional and development-only. Application modules must
 not import Dynra, use Dynra proxy domain values, or require Dynra decorators.
-Framework semantics belong in optional `dynra.adapters` packages; project-only
-semantics may live under development configuration such as `.dynra/`.
+Framework semantics belong in separately installed `dynra.adapters` packages.
+Project-only semantics must be explicitly opted into with
+`[tool.dynra].adapters = ["module:adapter"]`; Dynra does not scan application
+modules. Adapter discovery is lazy and failure-atomic.
 
 A lifecycle plan is mandatory before mutation. Check:
 
@@ -169,12 +171,48 @@ A lifecycle plan is mandatory before mutation. Check:
 - required process restart;
 - evidence-backed refusals.
 
-Adapters prepare and validate replacements before the atomic holder swap. A
-pre-swap failure leaves the old system active. A post-swap failure triggers
-holder rollback and compensation when safe. The journal identifies
-`old-system-active`, `old-system-restored`, `new-system-committed`, or
-`manual-recovery-required`. Do not continue automatically after manual recovery
-is required.
+Adapters prepare and validate replacements before definition or holder
+publication. A pre-swap failure leaves the old system active. A post-swap
+failure triggers holder rollback and compensation when safe. The journal
+identifies `old-system-active`, `old-system-restored`, `new-system-committed`,
+or `manual-recovery-required`. Do not continue automatically after manual
+recovery is required.
+
+When `source_after` contains a managed definition, lifecycle reconciliation
+accepts one side-effect-free function definition. It refuses classes,
+decorators, extra top-level statements, multi-definition batches, and eager
+defaults or annotations that can call user code; restart for those changes.
+This prevents staging from invoking metaclasses, subclass hooks, or shared-state
+mutations before validation.
+
+For an accepted function, reconciliation quiesces affected components and
+compiles the candidate outside the live module. Staging must preserve the live
+function's postponed-annotation compiler flag; resolved and unresolved
+annotations must not change from strings to objects. Adapters must consume the
+candidate from `ChangeSet.staged_definitions`; they must not read the old live
+global while preparing. The function publishes only after all replacements
+validate. Definition and resource rollback share one failure boundary. Missing
+quiescence or compensation is a refusal; never apply the definition separately.
+
+Only the affected component subgraph is rebuilt; dependencies outside it must
+retain identity. Read related components and bindings from one
+`LifecycleRuntime.snapshot()` generation. Ordinary module-global reads and
+separate holder reads can straddle publication and are not a transaction.
+
+`BindingKind.PRESERVED` retains identity, `RECOMPUTE` and `REGISTRY` require
+transactional prepare/validate operations, `COMPONENT` follows its owning
+component, and `RESTART` is a process boundary. Never reinterpret one kind as
+another.
+
+For Stario projects, install `dynra-stario` as a development dependency and
+load it before route registration. The development bootstrap must call
+`dynra_stario.compose_routes(app, build_routes)` around a side-effect-free route
+composer. Dynra then replays the current composer on the App's owner loop, gates
+new requests during reconciliation, and atomically publishes the replacement
+router while preserving the live App, listener, Relay, active requests,
+unaffected tasks, and streams. Production can call `build_routes(app)` directly.
+A changed running task requires an explicit `TaskSupervisor` policy or refuses.
+The adapter does not start or stop the application.
 
 Task replacement follows an explicit policy: `never`, `safe-point`, `immediate`,
 `drain`, `rolling`, or `manual`. Do not restart a task under a different policy

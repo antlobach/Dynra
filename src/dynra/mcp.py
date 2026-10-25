@@ -10,7 +10,6 @@ from .client import (
     request_runtime,
 )
 
-
 mcp = FastMCP("Dynra: live Python for coding agents")
 _MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 
@@ -98,7 +97,7 @@ def _tool_response(response, module):
         return _error_response(response["error"])
 
     success = bool(response.get("success"))
-    compact = {"success": success}
+    compact: dict[str, object] = {"success": success}
     if response.get("result") is not None:
         compact["result"] = response["result"]
     for field in ("stdout", "stderr"):
@@ -108,6 +107,8 @@ def _tool_response(response, module):
     source_sync = _compact_source_sync(response.get("source_sync"), module)
     if source_sync:
         compact["source_sync"] = source_sync
+    if response.get("lifecycle_plan") is not None:
+        compact["lifecycle_plan"] = response["lifecycle_plan"]
     if not success:
         compact["error"] = response.get("error") or "Python execution failed."
     return compact
@@ -156,9 +157,7 @@ def dynra_diff(runtime: str = "", port: int = 9999) -> dict:
 @mcp.tool()
 def dynra_persist(target: str = "", runtime: str = "", port: int = 9999) -> dict:
     """Persist one qualified live definition, or every live definition."""
-    return _control(
-        "persist", runtime=runtime, port=port, target=target or None
-    )
+    return _control("persist", runtime=runtime, port=port, target=target or None)
 
 
 @mcp.tool()
@@ -173,6 +172,7 @@ def dynra_revert(target: str, runtime: str = "", port: int = 9999) -> dict:
 def dynra_patch_log(runtime: str = "", port: int = 9999) -> dict:
     """Return the runtime's structured patch and persistence history."""
     return _control("patch_log", runtime=runtime, port=port)
+
 
 @mcp.tool()
 def dynra_events(
@@ -194,26 +194,26 @@ def dynra_events(
 @mcp.tool()
 def dynra_lifecycle_plan(
     definitions: list[str],
+    source_before: dict[str, str] | None = None,
+    source_after: dict[str, str] | None = None,
     runtime: str = "",
     port: int = 9999,
 ) -> dict:
-    """Plan lifecycle impact without mutating the runtime."""
+    """Plan lifecycle impact and source safety without mutating the runtime."""
     return _control(
         "lifecycle_plan",
         runtime=runtime,
         port=port,
         definitions=definitions,
+        source_before=source_before or {},
+        source_after=source_after or {},
     )
 
 
 @mcp.tool()
-def dynra_bootstrap(
-    force: bool = False, runtime: str = "", port: int = 9999
-) -> dict:
+def dynra_bootstrap(force: bool = False, runtime: str = "", port: int = 9999) -> dict:
     """Explicitly run the project's configured bootstrap target."""
-    return _control(
-        "bootstrap", runtime=runtime, port=port, force=force
-    )
+    return _control("bootstrap", runtime=runtime, port=port, force=force)
 
 
 @mcp.tool()

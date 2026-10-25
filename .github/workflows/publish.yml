@@ -23,7 +23,8 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --group dev
       - run: uv run pytest -q
-      - run: uv build
+      - run: uv build --out-dir dist
+      - run: uv build --project packages/dynra-stario --out-dir dist
       - run: uvx twine check dist/*
       - name: Publish distribution
         uses: pypa/gh-action-pypi-publish@release/v1

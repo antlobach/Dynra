@@ -179,8 +179,14 @@ class DynraServer(threading.Thread):
                 if not changes.definitions:
                     raise ValueError("definitions must not be empty")
                 if operation == "lifecycle_plan":
-                    return self.manager.lifecycle.impact_plan(changes).as_dict()
-                return asyncio.run(self.manager.lifecycle.reconcile(changes))
+                    return asyncio.run(
+                        self.manager.plan_lifecycle_changes(changes)
+                    ).as_dict()
+                return asyncio.run(
+                    self.manager.reconcile_lifecycle_changes(
+                        changes, approved=request.get("force", False)
+                    )
+                )
             if operation == "lifecycle_journal":
                 return list(self.manager.lifecycle.journal_view())
         raise ValueError(f"Unknown structured operation: {operation!r}.")
@@ -235,6 +241,7 @@ class DynraServer(threading.Thread):
         result_value = None
         error = None
         source_sync = self.manager.source_sync_status()
+        lifecycle_plan = None
         try:
             lines = payload.splitlines(keepends=True)
             request = None
@@ -255,16 +262,17 @@ class DynraServer(threading.Thread):
                 else:
                     source_sync = self.manager.reconcile_module_source()
                 if code.strip():
-                    execution = self.manager.execute_code(code, silent=request is not None)
+                    execution = self.manager.execute_code(
+                        code, silent=request is not None
+                    )
                     success = execution.success
                     result_value = (
-                        repr(execution.result)
-                        if execution.result is not None
-                        else None
+                        repr(execution.result) if execution.result is not None else None
                     )
                     if execution.error is not None:
                         error = f"{type(execution.error).__name__}: {execution.error}"
                     source_sync = self.manager.last_source_sync
+                    lifecycle_plan = execution.lifecycle_plan
                 else:
                     success = True
         except Exception as exception:
@@ -288,6 +296,7 @@ class DynraServer(threading.Thread):
             "error": error,
             "generation": self.manager.module_generation(),
             "source_sync": latest_sync,
+            "lifecycle_plan": lifecycle_plan,
         }
 
 
@@ -319,7 +328,12 @@ def _print_runtime(runtime):
 
 
 def _run_lifecycle_command(command, selector):
-    from .client import RuntimeConnectionError, control_request, discover_runtimes, find_runtime
+    from .client import (
+        RuntimeConnectionError,
+        control_request,
+        discover_runtimes,
+        find_runtime,
+    )
 
     try:
         if command in {"list", "clean"}:
@@ -335,7 +349,9 @@ def _run_lifecycle_command(command, selector):
                 for runtime in runtimes:
                     print(json.dumps(runtime, sort_keys=True))
                 return 0
-            raise RuntimeConnectionError(f"dynra {command} requires a runtime selector.")
+            raise RuntimeConnectionError(
+                f"dynra {command} requires a runtime selector."
+            )
         runtime = find_runtime(selector)
         if command == "status":
             response = control_request(
@@ -361,7 +377,9 @@ def _run_lifecycle_command(command, selector):
 
 def main():
     parser = argparse.ArgumentParser(description="Dynra live Python runtime")
-    parser.add_argument("command", nargs="?", choices=("list", "status", "stop", "clean"))
+    parser.add_argument(
+        "command", nargs="?", choices=("list", "status", "stop", "clean")
+    )
     parser.add_argument("selector", nargs="?", help="Runtime ID, port, or project path")
     parser.add_argument(
         "--port", type=int, default=9999, help="Port to run the Dynra server on"

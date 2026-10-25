@@ -1,0 +1,25 @@
+[project]
+name = "dynra-stario"
+version = "0.1.0"
+description = "Optional Stario lifecycle adapter for Dynra"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = ["dynra>=0.3.0", "stario>=4,<5"]
+
+[tool.uv.sources]
+dynra = { path = "../..", editable = true }
+
+[project.urls]
+Repository = "https://github.com/antlobach/Dynra"
+Issues = "https://github.com/antlobach/Dynra/issues"
+
+[project.entry-points."dynra.adapters"]
+stario = "dynra_stario:adapter"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

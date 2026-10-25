@@ -39,6 +39,7 @@ class ModuleInfo:
 @dataclass(frozen=True)
 class ProjectConfig:
     bootstrap: str | None = None
+    adapters: tuple[str, ...] = ()
 
 
 class ProjectLayout:
@@ -63,7 +64,9 @@ class ProjectLayout:
         if conventional.is_dir():
             configured.add(conventional.resolve())
         configured.add(project_root)
-        roots = tuple(sorted(configured, key=lambda path: (path != project_root, str(path))))
+        roots = tuple(
+            sorted(configured, key=lambda path: (path != project_root, str(path)))
+        )
         return cls(project_root, roots, cls._project_config(project_root))
 
     @staticmethod
@@ -75,18 +78,36 @@ class ProjectLayout:
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
             return ProjectConfig()
-        bootstrap = data.get("tool", {}).get("dynra", {}).get("bootstrap")
+        dynra = data.get("tool", {}).get("dynra", {})
+        bootstrap = dynra.get("bootstrap")
+        adapters = dynra.get("adapters", ())
+        if isinstance(adapters, str):
+            adapters = (adapters,)
+        if not isinstance(adapters, (list, tuple)) or not all(
+            isinstance(target, str) and target.strip() for target in adapters
+        ):
+            raise ValueError("[tool.dynra].adapters must contain import targets")
+
+        def validate_target(target, label):
+            target = target.strip()
+            module, separator, attribute = target.partition(":")
+            if not module or not all(part.isidentifier() for part in module.split(".")):
+                raise ValueError(f"Invalid Dynra {label} module: {module!r}")
+            if separator and (not attribute or not attribute.isidentifier()):
+                raise ValueError(f"Invalid Dynra {label} attribute: {attribute!r}")
+            return target
+
+        normalized_adapters = tuple(
+            validate_target(target, "adapter") for target in adapters
+        )
         if bootstrap is None:
-            return ProjectConfig()
+            return ProjectConfig(adapters=normalized_adapters)
         if not isinstance(bootstrap, str) or not bootstrap.strip():
             raise ValueError("[tool.dynra].bootstrap must be a non-empty string")
-        target = bootstrap.strip()
-        module, separator, attribute = target.partition(":")
-        if not module or not all(part.isidentifier() for part in module.split(".")):
-            raise ValueError(f"Invalid Dynra bootstrap module: {module!r}")
-        if separator and (not attribute or not attribute.isidentifier()):
-            raise ValueError(f"Invalid Dynra bootstrap callable: {attribute!r}")
-        return ProjectConfig(bootstrap=target)
+        return ProjectConfig(
+            bootstrap=validate_target(bootstrap, "bootstrap"),
+            adapters=normalized_adapters,
+        )
 
     @staticmethod
     def _configured_roots(root: Path) -> set[Path]:
@@ -141,7 +162,10 @@ class ProjectLayout:
             for path in source_root.rglob("*.py"):
                 resolved = path.resolve()
                 relative = resolved.relative_to(source_root)
-                if any(part in _IGNORED_PARTS or part.startswith(".") for part in relative.parts):
+                if any(
+                    part in _IGNORED_PARTS or part.startswith(".")
+                    for part in relative.parts
+                ):
                     continue
                 if source_root == self.root and any(
                     resolved.is_relative_to(nested) for nested in nested_roots
@@ -173,11 +197,14 @@ class ProjectLayout:
                 for alias in node.names:
                     names.add(alias.asname or alias.name.split(".")[0])
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
                 for target in targets:
                     if isinstance(target, ast.Name):
                         names.add(target.id)
         return tuple(sorted(name for name in names if not name.startswith("_")))
+
     def module_for_path(self, filename: str | Path) -> str | None:
         try:
             path = Path(filename).resolve()
@@ -187,7 +214,6 @@ class ProjectLayout:
             if info.path == path:
                 return name
         return None
-
 
     def owns_file(self, filename: str | None) -> bool:
         if not filename or filename.startswith("<"):
