@@ -42,8 +42,8 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: uv run pytest --cov=dynra --cov-report=term --cov-fail-under=65
 
-  build:
-    name: Build package
+  stario:
+    name: Stario adapter
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,12 +51,25 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv build
+      - run: uv run --project packages/dynra-stario --with pytest pytest -q packages/dynra-stario/tests/test_adapter.py
+
+  build:
+    name: Build packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv build --out-dir dist
+      - run: uv build --project packages/dynra-stario --out-dir dist
+      - run: uvx twine check dist/*
 
   gate:
     name: CI gate
     if: always()
-    needs: [test, coverage, build]
+    needs: [test, coverage, stario, build]
     runs-on: ubuntu-latest
     steps:
       - name: Require all checks
@@ -64,7 +77,9 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
+          STARIO_RESULT: ${{ needs.stario.result }}
         run: |
           test "$TEST_RESULT" = success
           test "$COVERAGE_RESULT" = success
+          test "$STARIO_RESULT" = success
           test "$BUILD_RESULT" = success

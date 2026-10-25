@@ -432,7 +432,7 @@ def test_definition_and_component_failure_roll_back_together(tmp_path):
             source_before={
                 "transaction_patch.value": "async def value():\n    return 1\n"
             },
-            source_after={"transaction_patch.value": "def value():\n    return 2\n"},
+            source_after={"transaction_patch.value": "async def value():\n    return 2\n"},
         )
 
         manager._track_lifecycle_holders(changes)

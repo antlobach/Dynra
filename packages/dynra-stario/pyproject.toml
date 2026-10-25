@@ -5,7 +5,10 @@ description = "Optional Stario lifecycle adapter for Dynra"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["dynra>=0.2.0", "stario>=4,<5"]
+dependencies = ["dynra>=0.3.0", "stario>=4,<5"]
+
+[tool.uv.sources]
+dynra = { path = "../..", editable = true }
 
 [project.urls]
 Repository = "https://github.com/antlobach/Dynra"
