@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import types
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -290,6 +291,8 @@ class NamespaceManager:
         self._active_snapshot: DefinitionSnapshot | None = None
         self._pending_source: str | None = None
         self._patch_refused = False
+        self._bootstrap_result: dict | None = None
+        self._bootstrap_attempts = 0
         self.create_md("user")
         self.install_commands()
 
@@ -299,6 +302,8 @@ class NamespaceManager:
             "create_md": self.create_md,
             "require_md": self.require_md,
             "in_md": self.in_md,
+            "bootstrap": self.bootstrap,
+            "bootstrap_status": self.bootstrap_status,
             "ls_md": self.ls_md,
             "help_dynra": self.help_dynra,
             "dir_md": self.dir_md,
@@ -359,6 +364,61 @@ class NamespaceManager:
         if name in self.synthetic_modules:
             return sys.modules[name]
         return importlib.import_module(name)
+
+    def bootstrap_status(self):
+        configured = self.project.config.bootstrap
+        if self._bootstrap_result is None:
+            return {
+                "configured": configured,
+                "completed": False,
+                "attempts": self._bootstrap_attempts,
+            }
+        return dict(self._bootstrap_result)
+
+    def bootstrap(self, force=False):
+        """Explicitly run the project's configured Dynra bootstrap target."""
+        target = self.project.config.bootstrap
+        if target is None:
+            raise ValueError("No [tool.dynra].bootstrap target is configured")
+        if self._bootstrap_result is not None and self._bootstrap_result["completed"] and not force:
+            result = dict(self._bootstrap_result)
+            result["already_completed"] = True
+            return result
+
+        self._bootstrap_attempts += 1
+        module_name, separator, attribute = target.partition(":")
+        try:
+            module = self.require_md(module_name)
+            exported = ()
+            if separator:
+                function = getattr(module, attribute)
+                if not callable(function):
+                    raise TypeError(f"Bootstrap target {target!r} is not callable")
+                namespace = sys.modules["user"].__dict__
+                value = function(namespace)
+                if value is not None:
+                    if not isinstance(value, Mapping):
+                        raise TypeError(
+                            f"Bootstrap target {target!r} must return a mapping or None"
+                        )
+                    namespace.update(value)
+                    exported = tuple(sorted(value))
+            self._bootstrap_result = {
+                "configured": target,
+                "completed": True,
+                "attempts": self._bootstrap_attempts,
+                "module": module_name,
+                "callable": attribute or None,
+                "exported": exported,
+            }
+            return dict(self._bootstrap_result)
+        except Exception:
+            self._bootstrap_result = {
+                "configured": target,
+                "completed": False,
+                "attempts": self._bootstrap_attempts,
+            }
+            raise
 
     def _init_ipython_ns(self, mod_dict):
         if not self.shell:
@@ -731,6 +791,8 @@ class NamespaceManager:
   create_md(name)          - Create a synthetic REPL module
   require_md(name)         - Import an existing module, surfacing import errors
   in_md(name)              - Enter an existing real or synthetic module
+  bootstrap([force=False]) - Explicitly run the configured project bootstrap
+  bootstrap_status()      - Show bootstrap configuration and completion state
   ls_md()                  - List discovered, loaded, synthetic, and external modules
   dir_md([module])         - List public symbols; statically inspects unloaded modules
   doc(obj) / source(obj)   - Inspect documentation and source
