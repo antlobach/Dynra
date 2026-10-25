@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/dynra-logo.svg" alt="Dynra" width="860">
+  <img src="https://raw.githubusercontent.com/antlobach/Dynra/main/assets/dynra-logo.svg" alt="Dynra" width="860">
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
   <a href="https://github.com/antlobach/Dynra/releases/latest"><img src="https://img.shields.io/github/v/release/antlobach/Dynra?style=flat-square&amp;display_name=tag&amp;cacheSeconds=300" alt="Latest release" height="20"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/antlobach/Dynra?style=flat-square" alt="Apache-2.0 license" height="20"></a>
-  <a href="https://deepwiki.com/antlobach/Dynra"><img src="assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
+  <a href="https://deepwiki.com/antlobach/Dynra"><img src="https://raw.githubusercontent.com/antlobach/Dynra/main/assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>
 
 ## Overview
