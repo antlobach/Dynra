@@ -1,0 +1,119 @@
+-- allium: 3
+-- Scope: optional development-time lifecycle reconciliation for Dynra runtimes
+-- Includes: planning, adapters, holders, bindings, tasks, atomic replacement,
+-- durable recovery, project-local adapters, and framework adapters
+-- Excludes: production coupling, security, native-state migration,
+-- executing-frame replacement, irreversible external effects
+
+actor Developer {
+    identified_by: this
+}
+
+entity Runtime { identity: String }
+
+contract DeterministicImpactPlanning {
+    plan: (runtime: Runtime, changes: List<Any>) -> Any
+    @invariant PlanBeforeMutation
+        -- Every definition and source-healing batch produces a plan before mutation.
+    @invariant MinimalAffectedSet
+        -- Changed components and affected dependents are included; unchanged prerequisites are preserved.
+    @invariant HolderEvidence
+        -- Every known holder is managed or reported as an exact unmanaged refusal.
+    @invariant UnsafePlansRefuse
+        -- Missing semantics, cycles, unmanaged holders, restart-only bindings, and disallowed task policies refuse before mutation.
+}
+
+contract FailureAtomicAdapterActivation {
+    activate: (runtime: Runtime, adapters: List<Any>) -> List<Any>
+    @invariant ExplicitSourcesOnly
+        -- Adapters come from installed entry points or explicit project configuration.
+    @invariant DevelopmentOnly
+        -- Normal application startup never imports Dynra to activate adapters.
+    @invariant RealInstances
+        -- Sync and async discovery attach actual live instances to managed holders.
+    @invariant NoPartialActivation
+        -- Discovery, duplicate, or dependency failure leaves no partial registration.
+}
+
+contract TransactionalReconciliation {
+    reconcile: (runtime: Runtime, plan: Any) -> Any
+    @invariant PrepareBeforeVisibility
+        -- Every replacement and validation completes before visibility changes.
+    @invariant AtomicGenerationVisibility
+        -- Readers observe one complete old or new generation, never a mixed set.
+    @invariant PreSwapRecovery
+        -- Failure resumes every old component and disposes every prepared replacement in reverse dependency order.
+    @invariant PostSwapCompensation
+        -- Post-swap failure restores the old generation and compensates; incomplete compensation requires manual recovery.
+    @invariant PreserveUnaffectedResources
+        -- Unaffected prerequisites, listeners, streams, and application state retain identity.
+}
+
+contract BindingReconciliation {
+    reconcile_bindings: (runtime: Runtime, plan: Any) -> List<Any>
+    @invariant PreservedMeansIdentity
+        -- Preserved bindings retain their live object.
+    @invariant RecomputeIsExplicit
+        -- Only explicitly classified safe bindings are recomputed.
+    @invariant RegistriesAreTransactional
+        -- Registries prepare, validate, retarget, and roll back transactionally.
+    @invariant ComponentsUseAdapters
+        -- Component bindings reconcile only through adapters.
+    @invariant RestartOnlyRefuses
+        -- Restart-only bindings produce evidence-backed refusal.
+    @invariant OrdinaryAssignmentsRemainOrdinary
+        -- Unclassified assignments retain normal Python semantics.
+}
+
+contract SupervisedTaskReconciliation {
+    reconcile_tasks: (runtime: Runtime, plan: Any) -> List<Any>
+    @invariant ExplicitPolicy
+        -- Every affected task uses never, safe-point, immediate, drain, rolling, or manual.
+    @invariant RefusalPolicies
+        -- Never and unapproved manual refuse before mutation.
+    @invariant BoundedSafePoint
+        -- Safe-point waits are bounded and cancellation-aware.
+    @invariant DrainOrdering
+        -- Drain stops new work before waiting for active work.
+    @invariant RollingReadiness
+        -- Rolling replacement proves readiness before old-task cancellation.
+    @invariant JournalTaskOutcome
+        -- Every affected task and outcome appears in the journal.
+}
+
+contract DurableRecovery {
+    journal: (runtime: Runtime) -> Any
+    @invariant AtomicPersistence
+        -- Plan, hashes, preparation, swap, validation, compensation, cleanup, and recovery state are atomically persisted.
+    @invariant CrashClassification
+        -- Restart inspection reports old active, old restored, new committed with incomplete cleanup, or manual recovery.
+    @invariant SafePruning
+        -- Only completed records are pruned; interrupted records remain inspectable.
+}
+
+contract OptionalFrameworkAdapter {
+    activate_framework: (runtime: Runtime, adapter: Any) -> List<Any>
+    @invariant NoProductionCoupling
+        -- Removing Dynra and adapters leaves application startup and behavior unchanged.
+    @invariant FrameworkLifecycleCoverage
+        -- Routes, middleware, lifespan, tasks, requests, streams, and listener shutdown are explicit.
+    @invariant PreserveLiveInfrastructure
+        -- Unaffected databases, relays, listeners, and streams remain live.
+}
+
+surface LifecycleControl {
+    facing developer: Developer
+    context runtime: Runtime where identity = developer
+    exposes:
+        runtime.identity
+    contracts:
+        fulfils DeterministicImpactPlanning
+        fulfils FailureAtomicAdapterActivation
+        fulfils TransactionalReconciliation
+        fulfils BindingReconciliation
+        fulfils SupervisedTaskReconciliation
+        fulfils DurableRecovery
+        fulfils OptionalFrameworkAdapter
+    @guarantee MachineReadableResults
+        -- Plans, refusals, journals, and recovery states are JSON-serializable and identify exact boundaries.
+}

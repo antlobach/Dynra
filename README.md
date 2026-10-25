@@ -343,6 +343,29 @@ The adapter API is exported from `dynra`: `ComponentAdapter`, `ChangeSet`,
 `LifecycleRuntime`, `ManagedHolder`, `RuntimeGraph`, `TaskSupervisor`,
 `TaskPolicy`, `BindingKind`, and `migrate_instances`.
 
+Adapters are discovered lazily when the first lifecycle plan or reconciliation
+is requested. A project can opt into an unpublished or project-local adapter
+without adding production imports:
+
+```toml
+[tool.dynra]
+adapters = ["my_project.dev_adapter:adapter"]
+```
+
+The module must be importable from the project's development environment. The
+value is a `module` or `module:attribute` target; Dynra never scans arbitrary
+project modules for adapters. Install the optional Stario integration with:
+
+```bash
+uv add --dev dynra-stario
+```
+
+It preserves the loaded `stario.App`, listener, Relay, active requests,
+unaffected tasks, and streams while rebuilding tracked route and middleware
+composition. Start Dynra before application bootstrap so registrations are
+tracked. A changed running task is refused unless a Dynra `TaskSupervisor`
+defines its replacement policy; Dynra never rewrites suspended coroutine frames.
+
 Agents can inspect and operate lifecycle reconciliation without evaluating
 arbitrary helper code:
 
@@ -352,8 +375,24 @@ dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtim
 dynra_lifecycle_journal(runtime="", port=9999)
 ```
 
-`dynra_lifecycle_plan` never mutates runtime state. The journal records source
-hashes, preparation, the atomic swap point, cleanup, compensation, and recovery
+For a managed definition change, pass the qualified name and matching source
+text in `source_before` and `source_after`. Dynra quiesces the affected
+components, applies the definitions, prepares against the new definitions, and
+commits one component/binding generation. Any definition, preparation,
+validation, commit, or cleanup failure restores both definitions and managed
+resources. An adapter without the required quiescence operation is refused.
+
+Affected supervised tasks use their declared `never`, `manual`, `safe-point`,
+`drain`, `rolling`, or `immediate` policy. `never` and unapproved `manual`
+plans refuse before mutation; each attempted task outcome is journaled.
+
+`dynra_lifecycle_plan` never mutates runtime state. A reconciliation rebuilds
+only the affected dependency subgraph; unchanged prerequisites retain object
+identity. Components and bindings become visible through one immutable
+generation snapshot, so adapter code must read related values from
+`LifecycleRuntime.snapshot()` rather than call separate holders across a swap.
+The durable per-project journal records source hashes, preparation, task
+outcomes, the atomic swap point, cleanup, compensation, and restart recovery
 state. Concrete framework semantics belong in separate optional packages.
 
 ## Security

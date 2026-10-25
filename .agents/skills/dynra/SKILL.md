@@ -157,8 +157,10 @@ status call after every clean evaluation.
 
 Lifecycle support is optional and development-only. Application modules must
 not import Dynra, use Dynra proxy domain values, or require Dynra decorators.
-Framework semantics belong in optional `dynra.adapters` packages; project-only
-semantics may live under development configuration such as `.dynra/`.
+Framework semantics belong in separately installed `dynra.adapters` packages.
+Project-only semantics must be explicitly opted into with
+`[tool.dynra].adapters = ["module:adapter"]`; Dynra does not scan application
+modules. Adapter discovery is lazy and failure-atomic.
 
 A lifecycle plan is mandatory before mutation. Check:
 
@@ -175,6 +177,28 @@ holder rollback and compensation when safe. The journal identifies
 `old-system-active`, `old-system-restored`, `new-system-committed`, or
 `manual-recovery-required`. Do not continue automatically after manual recovery
 is required.
+
+When `source_after` contains a managed definition, reconciliation quiesces the
+affected components and applies the definition before preparing replacements.
+Definition and resource rollback share one transaction boundary. Missing
+quiescence is a refusal; never apply the definition separately first.
+
+Only the affected component subgraph is rebuilt; dependencies outside it must
+retain identity. Read related components and bindings from one
+`LifecycleRuntime.snapshot()` generation. Separate holder reads can straddle a
+swap and are not a transaction.
+
+`BindingKind.PRESERVED` retains identity, `RECOMPUTE` and `REGISTRY` require
+transactional prepare/validate operations, `COMPONENT` follows its owning
+component, and `RESTART` is a process boundary. Never reinterpret one kind as
+another.
+
+For Stario projects, install `dynra-stario` as a development dependency and
+start Dynra before application bootstrap. It tracks and rebuilds route and
+middleware composition while preserving the live App, listener, Relay, active
+requests, unaffected tasks, and streams. A changed running task requires an
+explicit `TaskSupervisor` policy or refuses. The adapter does not start or stop
+the application.
 
 Task replacement follows an explicit policy: `never`, `safe-point`, `immediate`,
 `drain`, `rolling`, or `manual`. Do not restart a task under a different policy

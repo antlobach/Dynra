@@ -3,6 +3,7 @@ import builtins
 import copy
 import difflib
 import gc
+import hashlib
 import importlib
 import inspect
 import json
@@ -16,7 +17,13 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from .project import ProjectLayout
-from .lifecycle import LifecycleRuntime, discover_adapters
+from .lifecycle import (
+    ChangeSet,
+    LifecycleRuntime,
+    ReconciliationRefused,
+    discover_adapters,
+)
+from .registry import registry_directory
 
 #: CPython flag marking a code object as a coroutine.
 CO_COROUTINE = 0x0080
@@ -261,6 +268,7 @@ class ManagedExecutionResult:
     success: bool
     result: object = None
     error: BaseException | None = None
+    lifecycle_plan: dict | None = None
 
 
 class SourceConflictError(RuntimeError):
@@ -295,7 +303,9 @@ class NamespaceManager:
         self._source_conflicts: dict[str, tuple[str, ...]] = {}
         self._module_generations: dict[str, int] = {}
         self.last_source_sync: dict = {}
+        self.last_lifecycle_plan: dict | None = None
         self._reconciling_source = False
+        self._lifecycle_reconciling = False
         self._executing_module_name: str | None = None
         self._sequence = 0
         self._active_snapshot: DefinitionSnapshot | None = None
@@ -303,14 +313,241 @@ class NamespaceManager:
         self._patch_refused = False
         self._bootstrap_result: dict | None = None
         self._bootstrap_attempts = 0
-        self.lifecycle = LifecycleRuntime()
-        self.adapters = discover_adapters()
-        for adapter in self.adapters:
-            components = getattr(adapter, "components", (adapter,))
-            for component in components:
-                self.lifecycle.register_component(component)
+        self.adapters = discover_adapters(project_targets=self.project.config.adapters)
+        journal_dir = (
+            registry_directory()
+            / "journals"
+            / hashlib.sha256(str(self.project.root).encode("utf-8")).hexdigest()[:16]
+        )
+        self.lifecycle = LifecycleRuntime(
+            adapters=self.adapters,
+            journal_dir=journal_dir,
+        )
         self.create_md("user")
         self.install_commands()
+
+    @staticmethod
+    def _candidate_definition(module, definition: str, source: str):
+        tree = ast.parse(source)
+        node = next(
+            (
+                item
+                for item in tree.body
+                if isinstance(
+                    item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                )
+                and item.name == definition
+            ),
+            None,
+        )
+        if node is None:
+            return None
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+        candidate_node = copy.deepcopy(node)
+        candidate_node.decorator_list = []
+        candidate_tree = ast.fix_missing_locations(
+            ast.Module(body=[candidate_node], type_ignores=[])
+        )
+        module_code = compile(candidate_tree, f"<dynra-plan:{module.__name__}>", "exec")
+        function_code = next(
+            (
+                constant
+                for constant in module_code.co_consts
+                if isinstance(constant, types.CodeType)
+                and constant.co_name == definition
+            ),
+            None,
+        )
+        if function_code is None:
+            return None
+        closure = tuple(
+            (lambda value: lambda: value)(None).__closure__[0]
+            for _ in function_code.co_freevars
+        )
+        return types.FunctionType(
+            function_code,
+            module.__dict__,
+            definition,
+            closure=closure or None,
+        )
+
+    @staticmethod
+    def _class_source_requires_holder_retarget(current: type, source: str) -> bool:
+        tree = ast.parse(source)
+        node = next(
+            (item for item in tree.body if isinstance(item, ast.ClassDef)),
+            None,
+        )
+        if node is None:
+            return True
+        declared_bases = tuple(
+            ast.unparse(base).rsplit(".", 1)[-1] for base in node.bases
+        )
+        current_bases = tuple(base.__name__ for base in current.__bases__)
+        if declared_bases:
+            if declared_bases != current_bases:
+                return True
+        elif current.__bases__ != (object,):
+            return True
+        declared_slots = None
+        for statement in node.body:
+            targets = (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else (statement.target,)
+                if isinstance(statement, ast.AnnAssign)
+                else ()
+            )
+            if any(
+                isinstance(target, ast.Name) and target.id == "__slots__"
+                for target in targets
+            ):
+                try:
+                    declared_slots = ast.literal_eval(statement.value)
+                except (ValueError, TypeError):
+                    return True
+        if declared_slots != getattr(current, "__slots__", None):
+            return True
+        declared_metaclass = next(
+            (
+                ast.unparse(keyword.value).rsplit(".", 1)[-1]
+                for keyword in node.keywords
+                if keyword.arg == "metaclass"
+            ),
+            "type",
+        )
+        return declared_metaclass != type(current).__name__
+
+    def _requires_holder_retarget(self, target: str, source: str | None) -> bool:
+        if not source:
+            return True
+        module_name, definition = self._resolve_target(target)
+        current = getattr(sys.modules[module_name], definition, None)
+        if isinstance(current, type):
+            try:
+                return self._class_source_requires_holder_retarget(current, source)
+            except (SyntaxError, TypeError, ValueError):
+                return True
+        try:
+            candidate = self._candidate_definition(
+                sys.modules[module_name], definition, source
+            )
+        except (LookupError, SyntaxError, TypeError, ValueError):
+            return True
+        if isinstance(current, types.FunctionType) and isinstance(
+            candidate, types.FunctionType
+        ):
+            return bool(analyze_function_patch_compatibility(current, candidate))
+        if isinstance(current, type) and isinstance(candidate, type):
+            return bool(analyze_class_patch_compatibility(current, candidate))
+        return True
+
+    def _track_lifecycle_holders(self, changes: ChangeSet) -> None:
+        repairable = {"list", "dict", "set"}
+        for target in changes.definitions:
+            try:
+                module_name, definition = self._resolve_target(target)
+            except (KeyError, ValueError):
+                self.lifecycle.graph.replace_holder_evidence(target)
+                continue
+            if not self._requires_holder_retarget(
+                target, changes.source_after.get(target)
+            ):
+                self.lifecycle.graph.replace_holder_evidence(target)
+                continue
+            value = getattr(sys.modules[module_name], definition, None)
+            if not isinstance(value, (types.FunctionType, type)):
+                self.lifecycle.graph.replace_holder_evidence(target)
+                continue
+            holders = set(
+                direct_holders(
+                    value,
+                    ignore_ids={id(sys.modules[module_name].__dict__)}
+                    | self._internal_holder_ids(),
+                )
+            )
+            self.lifecycle.graph.replace_holder_evidence(
+                target,
+                managed=holders & repairable,
+                unmanaged=holders - repairable,
+            )
+
+    async def plan_lifecycle_changes(self, changes: ChangeSet):
+        if self.lifecycle._adapters and not self.lifecycle._activated:
+            await self.lifecycle.activate_adapters()
+        self._track_lifecycle_holders(changes)
+        return self.lifecycle.impact_plan(changes)
+
+    async def reconcile_lifecycle_changes(
+        self, changes: ChangeSet, *, approved: bool = False
+    ):
+        """Apply definitions and managed resources under one rollback boundary."""
+        self._track_lifecycle_holders(changes)
+        targets = tuple(
+            target for target in changes.definitions if target in changes.source_after
+        )
+        snapshots = {
+            target: self._capture_snapshot(*self._resolve_target(target))
+            for target in targets
+        }
+        undo_lengths = {key: len(stack) for key, stack in self._undo_stacks.items()}
+        live_sources = dict(self._live_sources)
+        source_bases = dict(self._source_bases)
+        module_generations = dict(self._module_generations)
+        original_module = self.current_name
+
+        def apply_definitions():
+            self._lifecycle_reconciling = True
+            for target in targets:
+                module_name, definition = self._resolve_target(target)
+                self.in_md(module_name)
+                source = changes.source_after[target]
+                if source:
+                    result = self.execute_code(source)
+                    if not result.success:
+                        raise result.error or ReconciliationRefused(
+                            (
+                                {
+                                    "definition": target,
+                                    "reason": "definition transaction was refused",
+                                },
+                            )
+                        )
+                else:
+                    self.unmap(definition)
+
+        def rollback_definitions():
+            for target in reversed(targets):
+                snapshot = snapshots[target]
+                namespace = sys.modules[snapshot.module].__dict__
+                replacement = namespace.get(snapshot.name)
+                self._restore_snapshot(snapshot)
+                self._retarget_module_references(
+                    replacement, snapshot.obj, snapshot.module
+                )
+                self._replace_mutable_references(replacement, snapshot.obj, namespace)
+            for key in list(self._undo_stacks):
+                keep = undo_lengths.get(key, 0)
+                del self._undo_stacks[key][keep:]
+                if not self._undo_stacks[key]:
+                    del self._undo_stacks[key]
+            self._live_sources = live_sources
+            self._source_bases = source_bases
+            self._module_generations = module_generations
+
+        has_definition_changes = bool(targets)
+        try:
+            return await self.lifecycle.reconcile(
+                changes,
+                approved=approved,
+                apply=apply_definitions if has_definition_changes else None,
+                rollback=rollback_definitions if has_definition_changes else None,
+            )
+        finally:
+            self._lifecycle_reconciling = False
+            if original_module in sys.modules:
+                self.in_md(original_module)
 
     @property
     def commands(self):
@@ -346,17 +583,17 @@ class NamespaceManager:
 
     @staticmethod
     def _validate_module_name(name):
-        if not isinstance(name, str) or not name or not all(
-            part.isidentifier() for part in name.split(".")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not all(part.isidentifier() for part in name.split("."))
         ):
             raise ValueError(f"Invalid Python module name: {name!r}")
 
     def _create_module(self, name):
         self._validate_module_name(name)
         if name in self.project.modules:
-            raise ValueError(
-                f"{name!r} is a project module; use require_md({name!r})"
-            )
+            raise ValueError(f"{name!r} is a project module; use require_md({name!r})")
         existing = sys.modules.get(name)
         if existing is not None and name not in self.synthetic_modules:
             if getattr(existing, "__file__", None) != f"<repl:{name}>":
@@ -397,7 +634,11 @@ class NamespaceManager:
         target = self.project.config.bootstrap
         if target is None:
             raise ValueError("No [tool.dynra].bootstrap target is configured")
-        if self._bootstrap_result is not None and self._bootstrap_result["completed"] and not force:
+        if (
+            self._bootstrap_result is not None
+            and self._bootstrap_result["completed"]
+            and not force
+        ):
             result = dict(self._bootstrap_result)
             result["already_completed"] = True
             return result
@@ -638,6 +879,34 @@ class NamespaceManager:
             for definition in set(base) | set(disk)
             if not self._same_definition(base.get(definition), disk.get(definition))
         }
+        lifecycle_changes = ChangeSet(
+            tuple(f"{module_name}.{name}" for name in sorted(changed_names)),
+            {f"{module_name}.{name}": base.get(name) or "" for name in changed_names},
+            {f"{module_name}.{name}": disk.get(name) or "" for name in changed_names},
+        )
+        self._track_lifecycle_holders(lifecycle_changes)
+        lifecycle_plan = self.lifecycle.impact_plan(lifecycle_changes)
+        self.last_lifecycle_plan = lifecycle_plan.as_dict()
+        if (
+            not lifecycle_plan.safe
+            or lifecycle_plan.affected_components
+            or lifecycle_plan.restarted
+            or lifecycle_plan.affected_bindings
+        ):
+            report = self.source_sync_status(module_name)
+            report.update(
+                status="lifecycle-refused",
+                lifecycle_plan=lifecycle_plan.as_dict(),
+                error="source changes affect managed lifecycle state",
+            )
+            self._record_event(
+                "source-sync",
+                module_name,
+                "*",
+                {"lifecycle_plan": lifecycle_plan.as_dict()},
+                status="refused",
+            )
+            return report
         changes = []
         conflicts = []
         restart_required = []
@@ -651,7 +920,9 @@ class NamespaceManager:
             )
         base_decorators = self._source_decorators.get(module_name, {})
         for definition in sorted(set(base_decorators) & set(metadata["decorators"])):
-            if base_decorators.get(definition) != metadata["decorators"].get(definition):
+            if base_decorators.get(definition) != metadata["decorators"].get(
+                definition
+            ):
                 restart_required.append(
                     {
                         "kind": "decorators",
@@ -730,9 +1001,7 @@ class NamespaceManager:
                 changes.append(
                     {
                         "definition": f"{module_name}.{definition}",
-                        "action": "added"
-                        if definition not in base
-                        else "updated",
+                        "action": "added" if definition not in base else "updated",
                     }
                 )
         finally:
@@ -777,9 +1046,7 @@ class NamespaceManager:
         else:
             self._source_conflicts.pop(module_name, None)
         if restart_required:
-            self._restart_required[module_name] = tuple(
-                copy.deepcopy(restart_required)
-            )
+            self._restart_required[module_name] = tuple(copy.deepcopy(restart_required))
         else:
             self._restart_required.pop(module_name, None)
         outcomes = tuple(copy.deepcopy(changes + restart_required))
@@ -867,9 +1134,7 @@ class NamespaceManager:
             for report in reports
             for diagnostic in report.get("restart_required", ())
         )
-        errors = tuple(
-            report["error"] for report in reports if report.get("error")
-        )
+        errors = tuple(report["error"] for report in reports if report.get("error"))
         if errors:
             aggregate["status"] = "error"
             aggregate["errors"] = errors
@@ -909,8 +1174,12 @@ class NamespaceManager:
 
     def ls_md(self):
         catalog = self.module_catalog()
-        print("Discovered project modules:", ", ".join(catalog["discovered"]) or "(none)")
-        print("Loaded project modules:", ", ".join(catalog["loaded_project"]) or "(none)")
+        print(
+            "Discovered project modules:", ", ".join(catalog["discovered"]) or "(none)"
+        )
+        print(
+            "Loaded project modules:", ", ".join(catalog["loaded_project"]) or "(none)"
+        )
         print("Synthetic REPL modules:", ", ".join(catalog["synthetic"]) or "(none)")
         print(f"External loaded modules: {len(catalog['external'])}")
         return catalog
@@ -932,7 +1201,9 @@ class NamespaceManager:
         elif isinstance(module, str):
             if module in sys.modules:
                 publics = [
-                    name for name in sys.modules[module].__dict__ if not name.startswith("_")
+                    name
+                    for name in sys.modules[module].__dict__
+                    if not name.startswith("_")
                 ]
             else:
                 publics = list(self.project.public_symbols(module))
@@ -1044,12 +1315,15 @@ class NamespaceManager:
             try:
                 if not self._redefine_in_place(name, previous, obj, namespace):
                     self._patch_refused = True
-                    self._record_event("refused", module_name, name, "incompatible redefinition")
+                    self._record_event(
+                        "refused", module_name, name, "incompatible redefinition"
+                    )
                     continue
             finally:
                 self._active_snapshot = None
             canonical = namespace.get(name, obj)
-            self._replace_mutable_references(obj, canonical, namespace)
+            self._replace_mutable_references(previous, canonical, namespace)
+            self._retarget_module_references(previous, canonical, module_name)
             self._propagate_update(name, canonical, module_name)
             self._record_change("patch", before, self._pending_source)
 
@@ -1159,9 +1433,9 @@ class NamespaceManager:
         before.sequence = self._sequence
         key = (before.module, before.name)
         if key not in self._source_bases:
-            self._source_bases[key] = self._disk_definition(
-                before.module, before.name
-            )[0]
+            self._source_bases[key] = self._disk_definition(before.module, before.name)[
+                0
+            ]
         self._undo_stacks.setdefault(key, []).append(before)
         self._live_sources[key] = source
         self._bump_module_generation(before.module)
@@ -1235,11 +1509,18 @@ class NamespaceManager:
                 current_ns[name] = old_obj
             return ok
 
-        holders = direct_holders(
+        discovered_holders = direct_holders(
             old_obj,
             ignore_ids={id(current_ns), id(self.prev_objects)}
             | self._internal_holder_ids(),
         )
+        repairable: set[str] = set()
+        holders = discovered_holders
+        qualified = f"{self._executing_module_name or self.current_name}.{name}"
+        for holder in sorted(set(discovered_holders)):
+            self.lifecycle.graph.track_holder(
+                qualified, holder, managed=holder in repairable
+            )
         safe = self.safe_function_patching if is_fn else self.safe_class_patching
         if holders and safe:
             current_ns[name] = old_obj
@@ -1260,11 +1541,15 @@ class NamespaceManager:
         if discarded is canonical:
             return
         referrers = gc.get_referrers(discarded)
-        ignored = {
-            id(referrers),
-            id(current_ns),
-            id(self.prev_objects),
-        } | self._internal_holder_ids() | _module_dict_ids()
+        ignored = (
+            {
+                id(referrers),
+                id(current_ns),
+                id(self.prev_objects),
+            }
+            | self._internal_holder_ids()
+            | _module_dict_ids()
+        )
         for holder in referrers:
             if id(holder) in ignored or isinstance(holder, types.FrameType):
                 continue
@@ -1279,6 +1564,19 @@ class NamespaceManager:
             elif isinstance(holder, set) and discarded in holder:
                 holder.remove(discarded)
                 holder.add(canonical)
+
+    @staticmethod
+    def _retarget_module_references(discarded, canonical, origin_mod_name):
+        if discarded is canonical:
+            return
+        for module_name, module in list(sys.modules.items()):
+            if module_name == origin_mod_name or not isinstance(
+                module, types.ModuleType
+            ):
+                continue
+            for binding, value in list(module.__dict__.items()):
+                if value is discarded:
+                    module.__dict__[binding] = canonical
 
     def _propagate_update(self, name, new_obj, origin_mod_name):
         for mod_name, mod in list(sys.modules.items()):
@@ -1312,9 +1610,65 @@ class NamespaceManager:
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         }
+        definition_sources = {
+            f"{module_name}.{node.name}": self._statement_source(code, node)
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+        lifecycle_plan_result = None
+        if definition_sources and not self._lifecycle_reconciling:
+            lifecycle_changes = ChangeSet(
+                tuple(sorted(definition_sources)),
+                {
+                    name: self._live_sources.get(
+                        tuple(name.rsplit(".", 1)),
+                        self._disk_definition(*name.rsplit(".", 1))[0] or "",
+                    )
+                    for name in definition_sources
+                },
+                definition_sources,
+            )
+            self._track_lifecycle_holders(lifecycle_changes)
+            plan = self.lifecycle.impact_plan(lifecycle_changes)
+            lifecycle_plan_result = plan.as_dict()
+            self.last_lifecycle_plan = lifecycle_plan_result
+            if (
+                not plan.safe
+                or plan.affected_components
+                or plan.restarted
+                or plan.affected_bindings
+            ):
+                error = ReconciliationRefused(
+                    plan.refusals
+                    or (
+                        {
+                            "reason": "definition affects managed lifecycle state",
+                            "components": plan.affected_components,
+                            "tasks": plan.restarted,
+                            "bindings": plan.affected_bindings,
+                            "suggested_action": "run lifecycle reconciliation",
+                        },
+                    )
+                )
+                self._record_event(
+                    "refused",
+                    module_name,
+                    ",".join(sorted(definition_names)),
+                    {"lifecycle_plan": lifecycle_plan_result},
+                    status="refused",
+                )
+                self._record_event(
+                    "transaction",
+                    module_name,
+                    ",".join(sorted(definition_names)),
+                    {"result": "rolled-back", "lifecycle_plan": lifecycle_plan_result},
+                    status="rolled-back",
+                )
+                return ManagedExecutionResult(
+                    False, error=error, lifecycle_plan=plan.as_dict()
+                )
         transaction = {
-            name: self._capture_snapshot(module_name, name)
-            for name in definition_names
+            name: self._capture_snapshot(module_name, name) for name in definition_names
         }
         undo_lengths = {key: len(stack) for key, stack in self._undo_stacks.items()}
         live_sources = dict(self._live_sources)
@@ -1342,9 +1696,7 @@ class NamespaceManager:
                 undecorated.decorator_list = []
                 ast.fix_missing_locations(undecorated)
                 executable = ast.unparse(undecorated)
-                print(
-                    f"↻ Redefining '{node.name}' without re-running its decorators."
-                )
+                print(f"↻ Redefining '{node.name}' without re-running its decorators.")
             self._pending_source = source
             try:
                 result = self.shell.run_cell(
@@ -1355,7 +1707,14 @@ class NamespaceManager:
             if not result.success or self._patch_refused:
                 namespace.pop(result_name, None)
                 for snapshot in transaction.values():
+                    replacement = namespace.get(snapshot.name)
                     self._restore_snapshot(snapshot)
+                    self._retarget_module_references(
+                        replacement, snapshot.obj, snapshot.module
+                    )
+                    self._replace_mutable_references(
+                        replacement, snapshot.obj, namespace
+                    )
                 # Audit events are append-only; the rollback event below records
                 # that earlier events in this transaction did not remain applied.
                 for key in list(self._undo_stacks):
@@ -1373,18 +1732,25 @@ class NamespaceManager:
                     {"result": "rolled-back"},
                     status="rolled-back",
                 )
+                refusal_plan = (
+                    self.lifecycle.impact_plan(lifecycle_changes).as_dict()
+                    if definition_sources
+                    else None
+                )
+                self.last_lifecycle_plan = refusal_plan
                 return ManagedExecutionResult(
                     False,
                     result.result,
                     getattr(result, "error_in_exec", None)
                     or getattr(result, "error_before_exec", None),
+                    lifecycle_plan=refusal_plan,
                 )
             last_result = (
-                namespace.pop(result_name, None)
-                if captures_result
-                else result.result
+                namespace.pop(result_name, None) if captures_result else result.result
             )
-        return ManagedExecutionResult(True, last_result)
+        return ManagedExecutionResult(
+            True, last_result, lifecycle_plan=lifecycle_plan_result
+        )
 
     @staticmethod
     def _statement_source(code, node):
@@ -1417,9 +1783,10 @@ class NamespaceManager:
             return target.__module__, target.__name__
         if not isinstance(target, str):
             raise TypeError("target must be a definition or qualified name")
-        if self.current_name in sys.modules and target in sys.modules[
-            self.current_name
-        ].__dict__:
+        if (
+            self.current_name in sys.modules
+            and target in sys.modules[self.current_name].__dict__
+        ):
             return self.current_name, target
         candidates = sorted(
             (
@@ -1591,9 +1958,7 @@ class NamespaceManager:
                     start, end = span
                     lines[start - 1 : end] = replacement
                 persisted.append(f"{module}.{name}")
-                self._record_event(
-                    "persist", module, name, {"path": str(path)}
-                )
+                self._record_event("persist", module, name, {"path": str(path)})
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         persisted_modules = {module for _, _, _, module, _ in changes}
         for key in list(self._live_sources):
