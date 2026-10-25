@@ -11,7 +11,21 @@ StarioAdapter = dynra_stario.StarioAdapter
 compose_routes = dynra_stario.compose_routes
 stario = pytest.importorskip("stario")
 App = stario.App
+responses = pytest.importorskip("stario.responses")
+TestClient = pytest.importorskip("stario.testing").TestClient
 Route = stario.Route
+
+
+def _routes_from_module_globals(app):
+    namespace = globals()
+    app.add(
+        namespace["Route"]("GET", "/value"),
+        namespace["handler"],
+    )
+
+
+def _routes_from_default(app, handler):
+    app.add(Route("GET", "/value"), handler)
 
 
 def test_stario_app_identity_routes_tasks_and_streams_are_preserved():
@@ -97,7 +111,7 @@ def test_replayable_routes_discover_local_app_and_reconcile_on_owner_loop():
         module = types.ModuleType("replayable_stario_routes")
 
         async def old_handler(context, writer):
-            return None
+            responses.text(writer, "old")
 
         def routes(app):
             app.add(Route("GET", "/old"), old_handler)
@@ -112,12 +126,16 @@ def test_replayable_routes_discover_local_app_and_reconcile_on_owner_loop():
         app = App()
         compose_routes(app, module.routes)
         original = app.find_handler("", "/old", "GET")[0]
+        async with TestClient(app, owns_shutdown=False) as client:
+            old_response = await client.get("/old")
+            assert old_response.status_code == 200
+            assert old_response.text == "old"
         try:
             runtime = LifecycleRuntime(adapters=(StarioAdapter(),))
             assert await runtime.activate_adapters() == ("stario-app",)
 
             async def new_handler(context, writer):
-                return None
+                responses.text(writer, "new")
 
             def updated_routes(candidate):
                 candidate.add(Route("GET", "/new"), new_handler)
@@ -144,6 +162,127 @@ def test_replayable_routes_discover_local_app_and_reconcile_on_owner_loop():
             assert runtime.holders["component:stario-app"].get() is app
             assert app.find_handler("", "/new", "GET")[0] is module.new_handler
             assert app.find_handler("", "/old", "GET")[0] is not original
+            async with TestClient(app, owns_shutdown=False) as client:
+                new_response = await client.get("/new")
+                old_response = await client.get("/old")
+                assert new_response.status_code == 200
+                assert new_response.text == "new"
+                assert old_response.status_code == 404
+        finally:
+            sys.modules.pop(module.__name__, None)
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_quiescence_reopens_request_admission():
+    async def scenario():
+        app = App()
+
+        async def handler(context, writer):
+            return None
+
+        app.add(Route("GET", "/value"), handler)
+        adapter = StarioAdapter()
+        runtime = LifecycleRuntime(adapters=(adapter,))
+        await runtime.activate_adapters()
+        task = asyncio.create_task(adapter.quiesce(app))
+        asyncio.get_running_loop().call_soon(task.cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert dynra_stario._control(app).gate.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_unchanged_composer_uses_staged_changed_handler():
+    async def scenario():
+        module = types.ModuleType("unchanged_stario_composer")
+
+        async def old_handler(context, writer):
+            responses.text(writer, "old")
+
+        module.Route = Route
+        module.handler = old_handler
+        module.routes = types.FunctionType(
+            _routes_from_module_globals.__code__,
+            module.__dict__,
+            "routes",
+        )
+        for name in ("handler", "routes"):
+            value = getattr(module, name)
+            value.__module__ = module.__name__
+            value.__qualname__ = name
+        sys.modules[module.__name__] = module
+        app = App()
+        compose_routes(app, module.routes)
+        try:
+            runtime = LifecycleRuntime(adapters=(StarioAdapter(),))
+            await runtime.activate_adapters()
+
+            async def new_handler(context, writer):
+                responses.text(writer, "new")
+
+            new_handler.__module__ = module.__name__
+            new_handler.__qualname__ = "handler"
+            await runtime.reconcile(
+                ChangeSet(
+                    ("unchanged_stario_composer.handler",),
+                    staged_definitions={
+                        "unchanged_stario_composer.handler": new_handler
+                    },
+                )
+            )
+            assert app.find_handler("", "/value", "GET")[0] is new_handler
+            async with TestClient(app, owns_shutdown=False) as client:
+                response = await client.get("/value")
+                assert response.status_code == 200
+                assert response.text == "new"
+        finally:
+            sys.modules.pop(module.__name__, None)
+
+    asyncio.run(scenario())
+
+
+def test_unchanged_composer_retargets_staged_handler_default():
+    async def scenario():
+        module = types.ModuleType("default_stario_composer")
+
+        async def old_handler(context, writer):
+            responses.text(writer, "old")
+
+        module.Route = Route
+        module.handler = old_handler
+        module.routes = types.FunctionType(
+            _routes_from_default.__code__,
+            module.__dict__,
+            "routes",
+            (old_handler,),
+        )
+        for name in ("handler", "routes"):
+            value = getattr(module, name)
+            value.__module__ = module.__name__
+            value.__qualname__ = name
+        sys.modules[module.__name__] = module
+        app = App()
+        compose_routes(app, module.routes)
+        try:
+            runtime = LifecycleRuntime(adapters=(StarioAdapter(),))
+            await runtime.activate_adapters()
+
+            async def new_handler(context, writer):
+                responses.text(writer, "new")
+
+            new_handler.__module__ = module.__name__
+            new_handler.__qualname__ = "handler"
+            await runtime.reconcile(
+                ChangeSet(
+                    ("default_stario_composer.handler",),
+                    staged_definitions={
+                        "default_stario_composer.handler": new_handler
+                    },
+                )
+            )
+            assert app.find_handler("", "/value", "GET")[0] is new_handler
         finally:
             sys.modules.pop(module.__name__, None)
 

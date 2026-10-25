@@ -305,18 +305,23 @@ def test_task_safe_point_timeout_and_rolling_readiness():
         with pytest.raises(asyncio.CancelledError):
             await safe.task
 
-        ready = asyncio.Event()
+        seen = []
+
+        async def readiness(replacement):
+            seen.append(replacement)
+            await asyncio.sleep(0)
+
         rolling = TaskSupervisor(
             "rolling",
             worker,
             TaskPolicy.ROLLING,
             watches=("pkg.*",),
-            readiness=ready.wait,
+            readiness=readiness,
             timeout=0.1,
         )
         old = rolling.start()
-        ready.set()
         await rolling.restart()
+        assert seen == [rolling.task]
         assert old.cancelled()
         rolling.task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -660,5 +665,624 @@ def test_rolling_readiness_receives_live_replacement_and_rejects_early_exit():
         )
         with pytest.raises(ReconciliationRefused, match="exited before readiness"):
             await failing.prepare_restart()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_reconciliations_are_serialized():
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        starts = []
+        external = {}
+
+        class SerializedAdapter(Adapter):
+            async def prepare(self, changes):
+                label = changes.definitions[0]
+                starts.append(label)
+                if label == "first":
+                    entered.set()
+                    await release.wait()
+                return label
+
+            async def commit(self, replacement):
+                external["value"] = replacement
+
+        runtime = LifecycleRuntime()
+        adapter = SerializedAdapter("service", ("*",))
+        runtime.register_component(adapter, adapter.live)
+        first = asyncio.create_task(runtime.reconcile(ChangeSet(("first",))))
+        await entered.wait()
+        second = asyncio.create_task(runtime.reconcile(ChangeSet(("second",))))
+        await asyncio.sleep(0)
+        assert starts == ["first"]
+        release.set()
+        await asyncio.gather(first, second)
+        assert starts == ["first", "second"]
+        assert external["value"] == "second"
+        assert runtime.graph.components["service"].instance == "second"
+
+    asyncio.run(scenario())
+
+
+def test_shared_live_resource_serializes_distinct_runtimes():
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        starts = []
+        resource = object()
+        external = {}
+
+        class SharedAdapter(Adapter):
+            async def prepare(self, changes):
+                label = changes.definitions[0]
+                starts.append(label)
+                if label == "first":
+                    entered.set()
+                    await release.wait()
+                return label
+
+            def publication(self, replacement):
+                return resource
+
+            async def commit(self, replacement):
+                external["value"] = replacement
+
+        first_runtime = LifecycleRuntime()
+        second_runtime = LifecycleRuntime()
+        first_runtime.register_component(
+            SharedAdapter("service", ("*",)), resource
+        )
+        second_runtime.register_component(
+            SharedAdapter("service", ("*",)), resource
+        )
+        first = asyncio.create_task(
+            first_runtime.reconcile(ChangeSet(("first",)))
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            second_runtime.reconcile(ChangeSet(("second",)))
+        )
+        await asyncio.sleep(0)
+        assert starts == ["first"]
+        release.set()
+        await asyncio.gather(first, second)
+        assert starts == ["first", "second"]
+        assert external["value"] == "second"
+
+    asyncio.run(scenario())
+
+
+def test_definitions_remain_old_while_replacements_prepare(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        shell = InteractiveShell()
+        manager = NamespaceManager(shell=shell, project_root=tmp_path)
+        module = manager.create_md("staged_visibility")
+        manager.in_md(module.__name__)
+        assert manager.execute_code("def value():\n    return 'old'\n").success
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingAdapter(Adapter):
+            async def prepare(self, changes):
+                staged = changes.staged_definitions[
+                    "staged_visibility.value"
+                ]
+                assert staged() == "new"
+                entered.set()
+                await release.wait()
+                return object()
+
+        adapter = BlockingAdapter(
+            "service", ("staged_visibility.value",)
+        )
+        manager.lifecycle.register_component(adapter, adapter.live)
+        changes = ChangeSet(
+            ("staged_visibility.value",),
+            source_before={
+                "staged_visibility.value": "def value():\n    return 'old'\n"
+            },
+            source_after={
+                "staged_visibility.value": "def value():\n    return 'new'\n"
+            },
+        )
+        transaction = asyncio.create_task(
+            manager.reconcile_lifecycle_changes(changes)
+        )
+        await entered.wait()
+        assert module.value() == "old"
+        release.set()
+        await transaction
+        assert module.value() == "new"
+
+    asyncio.run(scenario())
+
+
+def test_zero_argument_rolling_readiness_refuses_during_planning():
+    async def worker():
+        await asyncio.Event().wait()
+
+    runtime = LifecycleRuntime()
+    runtime.register_task(
+        TaskSupervisor(
+            "rolling",
+            worker,
+            TaskPolicy.ROLLING,
+            watches=("pkg.worker",),
+            readiness=lambda: asyncio.sleep(0),
+        )
+    )
+    plan = runtime.impact_plan(ChangeSet(("pkg.worker",)))
+    assert not plan.safe
+    assert "replacement task" in plan.refusals[0]["reason"]
+
+
+def test_new_definition_does_not_retarget_unrelated_none_values(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("new_definition")
+        module.unrelated = None
+        module.values = [None]
+        changes = ChangeSet(
+            ("new_definition.created",),
+            source_after={
+                "new_definition.created": "def created():\n    return 42\n"
+            },
+        )
+        await manager.reconcile_lifecycle_changes(changes)
+        assert module.created() == 42
+        assert module.unrelated is None
+        assert module.values == [None]
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_manager_failure_preserves_prior_commit(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("serialized_definition")
+        manager.in_md(module.__name__)
+        assert manager.execute_code("def value():\n    return 0\n").success
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class OrderedAdapter(Adapter):
+            async def prepare(self, changes):
+                source = changes.source_after[
+                    "serialized_definition.value"
+                ]
+                if "return 1" in source:
+                    entered.set()
+                    await release.wait()
+                    return 1
+                return 2
+
+            async def validate(self, replacement):
+                if replacement == 2:
+                    raise RuntimeError("second validation failed")
+
+        adapter = OrderedAdapter(
+            "service", ("serialized_definition.value",)
+        )
+        manager.lifecycle.register_component(adapter, adapter.live)
+        first_changes = ChangeSet(
+            ("serialized_definition.value",),
+            source_after={
+                "serialized_definition.value": "def value():\n    return 1\n"
+            },
+        )
+        second_changes = ChangeSet(
+            ("serialized_definition.value",),
+            source_after={
+                "serialized_definition.value": "def value():\n    return 2\n"
+            },
+        )
+        first = asyncio.create_task(
+            manager.reconcile_lifecycle_changes(first_changes)
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            manager.reconcile_lifecycle_changes(second_changes)
+        )
+        release.set()
+        await first
+        with pytest.raises(RuntimeError, match="second validation failed"):
+            await second
+        assert module.value() == 1
+
+    asyncio.run(scenario())
+
+
+def test_staged_definitions_share_staged_module_globals(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("staged_peers")
+        manager.in_md(module.__name__)
+        assert manager.execute_code(
+            "def helper():\n    return 'old'\n\n"
+            "def handler():\n    return helper()\n"
+        ).success
+
+        class PeerAdapter(Adapter):
+            async def prepare(self, changes):
+                staged_handler = changes.staged_definitions[
+                    "staged_peers.handler"
+                ]
+                assert staged_handler() == "new"
+                assert module.handler() == "old"
+                return object()
+
+        adapter = PeerAdapter("service", ("staged_peers.*",))
+        manager.lifecycle.register_component(adapter, adapter.live)
+        await manager.reconcile_lifecycle_changes(
+            ChangeSet(
+                ("staged_peers.helper", "staged_peers.handler"),
+                source_after={
+                    "staged_peers.helper": (
+                        "def helper():\n    return 'new'\n"
+                    ),
+                    "staged_peers.handler": (
+                        "def handler():\n    return helper()\n"
+                    ),
+                },
+            )
+        )
+        assert module.handler() == "new"
+
+    asyncio.run(scenario())
+
+
+def test_existing_decorator_does_not_run_during_failed_staging(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("decorator_staging")
+        manager.in_md(module.__name__)
+        assert manager.execute_code(
+            "calls = 0\n"
+            "def decorate(fn):\n"
+            "    global calls\n"
+            "    calls += 1\n"
+            "    return fn\n"
+            "@decorate\n"
+            "def value():\n"
+            "    return 'old'\n"
+        ).success
+        assert module.calls == 1
+        adapter = Adapter(
+            "service",
+            ("decorator_staging.value",),
+            fail="validate",
+        )
+        manager.lifecycle.register_component(adapter, adapter.live)
+        with pytest.raises(ReconciliationRefused, match="decorated definitions"):
+            await manager.reconcile_lifecycle_changes(
+                ChangeSet(
+                    ("decorator_staging.value",),
+                    source_after={
+                        "decorator_staging.value": (
+                            "@decorate\n"
+                            "def value():\n"
+                            "    return 'new'\n"
+                        )
+                    },
+                )
+            )
+        assert module.calls == 1
+        assert module.value() == "old"
+
+    asyncio.run(scenario())
+
+
+def test_unhashable_resource_mutex_lease_is_released():
+    from dynra.lifecycle import _UNHASHABLE_RESOURCE_MUTEXES
+
+    async def scenario():
+        before = dict(_UNHASHABLE_RESOURCE_MUTEXES)
+        runtime = LifecycleRuntime()
+        adapter = Adapter("service", ("pkg.value",))
+        runtime.register_component(adapter, {"version": 1})
+        await runtime.reconcile(ChangeSet(("pkg.value",)))
+        assert _UNHASHABLE_RESOURCE_MUTEXES == before
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_quiescence_always_resumes_registered_component():
+    async def scenario():
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+        admission = {"open": True}
+
+        class CancelledAdapter(Adapter):
+            async def quiesce(self, old):
+                admission["open"] = False
+                entered.set()
+                await blocked.wait()
+
+            async def resume(self, component):
+                admission["open"] = True
+
+        runtime = LifecycleRuntime()
+        adapter = CancelledAdapter("service", ("pkg.value",))
+        runtime.register_component(adapter, adapter.live)
+        transaction = asyncio.create_task(
+            runtime.reconcile(ChangeSet(("pkg.value",)))
+        )
+        await entered.wait()
+        transaction.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await transaction
+        assert admission["open"]
+
+    asyncio.run(scenario())
+
+
+def test_staged_peer_identity_references_use_live_canonical_objects(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("canonical_staging")
+        manager.in_md(module.__name__)
+        assert manager.execute_code(
+            "class Base:\n"
+            "    def value(self):\n"
+            "        return 'old'\n\n"
+            "def helper():\n"
+            "    return 'old'\n"
+        ).success
+        live_base = module.Base
+        live_helper = module.helper
+
+        class IdentityAdapter(Adapter):
+            async def prepare(self, changes):
+                child = changes.staged_definitions[
+                    "canonical_staging.Child"
+                ]
+                consumer = changes.staged_definitions[
+                    "canonical_staging.consumer"
+                ]
+                assert child.__bases__ == (live_base,)
+                assert consumer.__defaults__ == (live_helper,)
+                assert consumer.__annotations__["dep"] is live_helper
+                return object()
+
+        adapter = IdentityAdapter("service", ("canonical_staging.*",))
+        manager.lifecycle.register_component(adapter, adapter.live)
+        await manager.reconcile_lifecycle_changes(
+            ChangeSet(
+                (
+                    "canonical_staging.Base",
+                    "canonical_staging.helper",
+                    "canonical_staging.Child",
+                    "canonical_staging.consumer",
+                ),
+                source_after={
+                    "canonical_staging.Base": (
+                        "class Base:\n"
+                        "    def value(self):\n"
+                        "        return 'new'\n"
+                    ),
+                    "canonical_staging.helper": (
+                        "def helper():\n    return 'new'\n"
+                    ),
+                    "canonical_staging.Child": "class Child(Base):\n    pass\n",
+                    "canonical_staging.consumer": (
+                        "def consumer(dep: helper = helper):\n"
+                        "    return dep()\n"
+                    ),
+                },
+            )
+        )
+        assert module.Base is live_base
+        assert module.helper is live_helper
+        assert module.Child.__bases__ == (module.Base,)
+        assert module.consumer.__defaults__ == (module.helper,)
+        assert module.consumer.__annotations__["dep"] is module.helper
+        assert module.Child().value() == "new"
+        assert module.consumer() == "new"
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_mutex_grant_does_not_deadlock_next_reconcile():
+    from dynra.lifecycle import _AsyncMutex
+
+    async def scenario():
+        mutex = _AsyncMutex()
+        await mutex.acquire()
+        waiter = asyncio.create_task(mutex.acquire())
+        await asyncio.sleep(0)
+        mutex.release()
+        asyncio.get_running_loop().call_soon(waiter.cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await asyncio.wait_for(mutex.acquire(), 0.1)
+        mutex.release()
+
+    asyncio.run(scenario())
+
+
+def test_rebound_class_peer_batch_refuses_without_partial_publication(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("rebound_staging")
+        manager.in_md(module.__name__)
+        assert manager.execute_code(
+            "class Parent:\n"
+            "    pass\n\n"
+            "class Base:\n"
+            "    pass\n"
+        ).success
+        original = module.Base
+
+        class ReboundAdapter(Adapter):
+            async def prepare(self, changes):
+                base = changes.staged_definitions[
+                    "rebound_staging.Base"
+                ]
+                child = changes.staged_definitions[
+                    "rebound_staging.Child"
+                ]
+                assert child.__bases__ == (base,)
+                return object()
+
+        adapter = ReboundAdapter("service", ("rebound_staging.*",))
+        manager.lifecycle.register_component(adapter, adapter.live)
+        with pytest.raises(ReconciliationRefused):
+            await manager.reconcile_lifecycle_changes(
+                ChangeSet(
+                    ("rebound_staging.Base", "rebound_staging.Child"),
+                    source_after={
+                        "rebound_staging.Base": (
+                            "class Base(Parent):\n    pass\n"
+                        ),
+                        "rebound_staging.Child": (
+                            "class Child(Base):\n    pass\n"
+                        ),
+                    },
+                )
+            )
+        assert module.Base is original
+        assert not hasattr(module, "Child")
+
+    asyncio.run(scenario())
+
+
+def test_new_peer_defaults_publish_exact_identity_in_reverse_order(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("reverse_staging")
+        adapter = Adapter("service", ("reverse_staging.*",))
+        manager.lifecycle.register_component(adapter, adapter.live)
+        await manager.reconcile_lifecycle_changes(
+            ChangeSet(
+                (
+                    "reverse_staging.consumer",
+                    "reverse_staging.helper",
+                ),
+                source_after={
+                    "reverse_staging.consumer": (
+                        "def consumer(dep=helper):\n    return dep()\n"
+                    ),
+                    "reverse_staging.helper": (
+                        "def helper():\n    return 'new'\n"
+                    ),
+                },
+            )
+        )
+        assert module.consumer.__defaults__ == (module.helper,)
+        assert module.consumer() == "new"
+
+    asyncio.run(scenario())
+
+
+def test_method_body_peer_references_are_not_eager_dependencies(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("method_peers")
+        adapter = Adapter("service", ("method_peers.*",))
+        manager.lifecycle.register_component(adapter, adapter.live)
+        await manager.reconcile_lifecycle_changes(
+            ChangeSet(
+                ("method_peers.A", "method_peers.B"),
+                source_after={
+                    "method_peers.A": (
+                        "class A:\n"
+                        "    def peer(self):\n"
+                        "        return B\n"
+                    ),
+                    "method_peers.B": (
+                        "class B:\n"
+                        "    def peer(self):\n"
+                        "        return A\n"
+                    ),
+                },
+            )
+        )
+        assert module.A().peer() is module.B
+        assert module.B().peer() is module.A
+
+    asyncio.run(scenario())
+
+
+def test_cross_module_eager_dependency_uses_staged_module_view(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        base_module = manager.create_md("staged_base")
+        child_module = manager.create_md("staged_child")
+        child_module.staged_base = base_module
+        adapter = Adapter(
+            "service", ("staged_base.*", "staged_child.*")
+        )
+        manager.lifecycle.register_component(adapter, adapter.live)
+        await manager.reconcile_lifecycle_changes(
+            ChangeSet(
+                ("staged_child.Child", "staged_base.Base"),
+                source_after={
+                    "staged_child.Child": (
+                        "class Child(staged_base.Base):\n    pass\n"
+                    ),
+                    "staged_base.Base": "class Base:\n    pass\n",
+                },
+            )
+        )
+        assert child_module.Child.__bases__ == (base_module.Base,)
 
     asyncio.run(scenario())

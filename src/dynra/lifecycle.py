@@ -12,8 +12,9 @@ import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, field
+import weakref
+from collections.abc import Callable, Coroutine, Iterable, Mapping
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from importlib import metadata
 from pathlib import Path
@@ -56,6 +57,7 @@ class ChangeSet:
     definitions: tuple[str, ...]
     source_before: Mapping[str, str] = field(default_factory=dict)
     source_after: Mapping[str, str] = field(default_factory=dict)
+    staged_definitions: Mapping[str, Any] = field(default_factory=dict)
 
     def hashes(self) -> dict[str, dict[str, str]]:
         digest = lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -413,6 +415,108 @@ async def _invoke(
     value = function(*args)
     return await value if inspect.isawaitable(value) else value
 
+class _AsyncMutex:
+    """Loop-independent FIFO mutex for runtimes called from temporary event loops."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._held = False
+        self._waiters: list[asyncio.Future[None]] = []
+
+    async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        with self._guard:
+            if not self._held:
+                self._held = True
+                return
+            waiter = loop.create_future()
+            self._waiters.append(waiter)
+        try:
+            await waiter
+        except BaseException:
+            granted = False
+            with self._guard:
+                if waiter in self._waiters:
+                    self._waiters.remove(waiter)
+                else:
+                    granted = waiter.done() and not waiter.cancelled()
+            if granted:
+                self.release()
+            raise
+
+    def release(self) -> None:
+        with self._guard:
+            while self._waiters:
+                waiter = self._waiters.pop(0)
+                if not waiter.cancelled():
+                    break
+            else:
+                self._held = False
+                return
+        loop = waiter.get_loop()
+
+        def grant() -> None:
+            if waiter.cancelled():
+                self.release()
+            elif not waiter.done():
+                waiter.set_result(None)
+
+        loop.call_soon_threadsafe(grant)
+
+
+_RESOURCE_MUTEX_GUARD = threading.Lock()
+_RESOURCE_MUTEXES: weakref.WeakKeyDictionary[Any, _AsyncMutex] = (
+    weakref.WeakKeyDictionary()
+)
+_UNHASHABLE_RESOURCE_MUTEXES: dict[
+    int, tuple[Any, _AsyncMutex, int]
+] = {}
+
+
+def _resource_mutex(resource: Any) -> _AsyncMutex:
+    with _RESOURCE_MUTEX_GUARD:
+        try:
+            mutex = _RESOURCE_MUTEXES.get(resource)
+        except TypeError:
+            key = id(resource)
+            entry = _UNHASHABLE_RESOURCE_MUTEXES.get(key)
+            if entry is None or entry[0] is not resource:
+                mutex = _AsyncMutex()
+                _UNHASHABLE_RESOURCE_MUTEXES[key] = (resource, mutex, 1)
+            else:
+                _, mutex, leases = entry
+                _UNHASHABLE_RESOURCE_MUTEXES[key] = (
+                    resource,
+                    mutex,
+                    leases + 1,
+                )
+            return mutex
+        if mutex is None:
+            mutex = _AsyncMutex()
+            _RESOURCE_MUTEXES[resource] = mutex
+        return mutex
+
+
+
+
+def _release_resource_mutex_lease(resource: Any, mutex: _AsyncMutex) -> None:
+    with _RESOURCE_MUTEX_GUARD:
+        try:
+            _RESOURCE_MUTEXES.get(resource)
+            return
+        except TypeError:
+            key = id(resource)
+            entry = _UNHASHABLE_RESOURCE_MUTEXES.get(key)
+            if entry is None or entry[0] is not resource or entry[1] is not mutex:
+                return
+            if entry[2] == 1:
+                del _UNHASHABLE_RESOURCE_MUTEXES[key]
+            else:
+                _UNHASHABLE_RESOURCE_MUTEXES[key] = (
+                    resource,
+                    mutex,
+                    entry[2] - 1,
+                )
 
 class LifecycleRuntime:
     def __init__(
@@ -428,6 +532,7 @@ class LifecycleRuntime:
         self._activated = False
         self._journal = DurableJournal(journal_dir)
         self.journal = self._journal.entries
+        self._reconcile_mutex = _AsyncMutex()
 
     def snapshot(self) -> Mapping[str, Any]:
         return self._store.snapshot()
@@ -672,14 +777,33 @@ class LifecycleRuntime:
                         "suggested_action": "configure task drain semantics",
                     }
                 )
-            elif task.policy is TaskPolicy.ROLLING and task.readiness is None:
-                refusals.append(
-                    {
-                        "task": name,
-                        "reason": "rolling policy has no readiness check",
-                        "suggested_action": "configure task readiness semantics",
-                    }
-                )
+            elif task.policy is TaskPolicy.ROLLING:
+                if task.readiness is None:
+                    refusals.append(
+                        {
+                            "task": name,
+                            "reason": "rolling policy has no readiness check",
+                            "suggested_action": (
+                                "configure task readiness semantics"
+                            ),
+                        }
+                    )
+                else:
+                    try:
+                        inspect.signature(task.readiness).bind(object())
+                    except (TypeError, ValueError):
+                        refusals.append(
+                            {
+                                "task": name,
+                                "reason": (
+                                    "rolling readiness must accept the "
+                                    "replacement task"
+                                ),
+                                "suggested_action": (
+                                    "accept the replacement task and verify it"
+                                ),
+                            }
+                        )
         return ImpactPlan(
             not refusals,
             restart,
@@ -705,6 +829,63 @@ class LifecycleRuntime:
         changes: ChangeSet,
         *,
         approved: bool = False,
+        stage: Callable[[], Any] | None = None,
+        before: Callable[[], Any] | None = None,
+        after: Callable[[], Any] | None = None,
+        lock_resources: Iterable[Any] = (),
+        apply: Callable[[], Any] | None = None,
+        rollback: Callable[[], Any] | None = None,
+    ) -> Mapping[str, Any]:
+        await self._reconcile_mutex.acquire()
+        resource_mutexes: list[_AsyncMutex] = []
+        resource_leases: list[tuple[Any, _AsyncMutex]] = []
+        try:
+            if self._adapters and not self._activated:
+                await self.activate_adapters()
+            plan = self.impact_plan(changes)
+            resources = {
+                id(registration.instance): registration.instance
+                for name in plan.affected_components
+                if (registration := self.graph.components[name]).instance is not None
+            }
+            resources.update(
+                {id(resource): resource for resource in lock_resources}
+            )
+            for _, resource in sorted(resources.items()):
+                mutex = _resource_mutex(resource)
+                resource_leases.append((resource, mutex))
+                await mutex.acquire()
+                resource_mutexes.append(mutex)
+            try:
+                if before is not None:
+                    initialized = before()
+                    if inspect.isawaitable(initialized):
+                        await initialized
+                return await self._reconcile_locked(
+                    changes,
+                    approved=approved,
+                    stage=stage,
+                    apply=apply,
+                    rollback=rollback,
+                )
+            finally:
+                if after is not None:
+                    finalized = after()
+                    if inspect.isawaitable(finalized):
+                        await finalized
+        finally:
+            for mutex in reversed(resource_mutexes):
+                mutex.release()
+            for resource, mutex in reversed(resource_leases):
+                _release_resource_mutex_lease(resource, mutex)
+            self._reconcile_mutex.release()
+
+    async def _reconcile_locked(
+        self,
+        changes: ChangeSet,
+        *,
+        approved: bool = False,
+        stage: Callable[[], Any] | None = None,
         apply: Callable[[], Any] | None = None,
         rollback: Callable[[], Any] | None = None,
     ) -> Mapping[str, Any]:
@@ -740,6 +921,21 @@ class LifecycleRuntime:
                                 ),
                             }
                         )
+        if apply is not None:
+            for name in plan.restarted:
+                if self.task_supervisors[name].policy is TaskPolicy.ROLLING:
+                    preflight_refusals.append(
+                        {
+                            "task": name,
+                            "reason": (
+                                "rolling replacement cannot prove readiness "
+                                "before staged definitions are published"
+                            ),
+                            "suggested_action": (
+                                "use a gated task policy or restart"
+                            ),
+                        }
+                    )
         if tuple(preflight_refusals) != plan.refusals:
             plan = ImpactPlan(
                 **{
@@ -768,24 +964,28 @@ class LifecycleRuntime:
         definitions_applied = False
         try:
             for reg in reversed(regs):
+                # Register compensation before invoking user code so any
+                # cancellation point still resumes request admission.
+                quiesced.append(reg)
                 await _invoke(
                     reg.adapter,
                     "quiesce",
                     reg.instance,
                     required=len(regs) > 1 or apply is not None,
                 )
-                quiesced.append(reg)
+            if stage is not None:
+                staged = stage()
+                if inspect.isawaitable(staged):
+                    staged = await staged
+                changes = replace(
+                    changes, staged_definitions=dict(staged or {})
+                )
             snapshots = {
                 reg.name: await _invoke(reg.adapter, "snapshot", reg.instance)
                 for reg in regs
             }
-            if apply is not None:
-                definitions_applied = True
-                applied = apply()
-                if inspect.isawaitable(applied):
-                    await applied
-                entry.phases.append({"phase": "definitions-applied"})
-                self._journal.persist(entry)
+            # Definition publication occurs only after every replacement has
+            # prepared and validated.
             for reg in regs:
                 replacement = await _invoke(
                     reg.adapter, "prepare", changes, required=True
@@ -860,6 +1060,18 @@ class LifecycleRuntime:
                 }
             )
             self._journal.persist(entry)
+            if apply is not None:
+                definitions_applied = True
+                applied = apply()
+                if inspect.isawaitable(applied):
+                    close = getattr(applied, "close", None)
+                    if close is not None:
+                        close()
+                    raise TypeError(
+                        "definition publication callback must be synchronous"
+                    )
+                entry.phases.append({"phase": "definitions-applied"})
+                self._journal.persist(entry)
             replacements = {
                 f"component:{name}": value
                 for name, value in prepared_publications.items()
@@ -993,7 +1205,7 @@ class TaskSupervisor:
     def __init__(
         self,
         name: str,
-        factory: Callable[[], Awaitable[Any]],
+        factory: Callable[[], Coroutine[Any, Any, Any]],
         policy: TaskPolicy | str,
         *,
         watches: Iterable[str] = (),
@@ -1069,16 +1281,20 @@ class TaskSupervisor:
             readiness_task = None
             try:
                 try:
-                    accepts_replacement = bool(
-                        inspect.signature(self.readiness).parameters
-                    )
-                except (TypeError, ValueError):
-                    accepts_replacement = False
-                value = (
-                    self.readiness(replacement)
-                    if accepts_replacement
-                    else self.readiness()
-                )
+                    inspect.signature(self.readiness).bind(replacement)
+                except (TypeError, ValueError) as error:
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "task": self.name,
+                                "reason": (
+                                    "rolling readiness must accept the "
+                                    "replacement task"
+                                ),
+                            },
+                        )
+                    ) from error
+                value = self.readiness(replacement)
                 readiness_task = asyncio.ensure_future(
                     value if inspect.isawaitable(value) else asyncio.sleep(0)
                 )
@@ -1190,8 +1406,7 @@ def _load_target(target: str) -> Any:
 def discover_adapters(
     group: str = "dynra.adapters", *, project_targets: Iterable[str] = ()
 ) -> tuple[Any, ...]:
-    eps = metadata.entry_points()
-    selected = eps.select(group=group) if hasattr(eps, "select") else eps.get(group, ())
+    selected = metadata.entry_points().select(group=group)
     adapters = []
     for ep in sorted(selected, key=lambda item: item.name):
         loaded = ep.load()

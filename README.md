@@ -380,17 +380,23 @@ dynra_lifecycle_journal(runtime="", port=9999)
 ```
 
 For a managed definition change, pass the qualified name and matching source
-text in `source_before` and `source_after`. Dynra quiesces the affected
-components, applies the definitions, prepares against the new definitions, and
-commits one component/binding generation. Definition, preparation, validation,
-or commit failure restores definitions and managed resources when compensation
-succeeds. Cleanup runs after the new generation commits; cleanup failure retains
-the new generation and records `cleanup-incomplete`. An adapter without the
-required quiescence or compensation operation is refused before mutation.
+text in `source_before` and `source_after`. Dynra quiesces affected components,
+compiles definitions into a staging namespace, and exposes candidates to
+adapters as `ChangeSet.staged_definitions`. Only after every component, binding,
+and gated task replacement prepares and validates does Dynra publish the
+definitions and one component/binding generation. Transactions serialize per
+runtime and per shared live adapter resource. Definition publication,
+preparation, validation, or commit failure restores definitions and managed
+resources when compensation succeeds. Cleanup runs after the new generation
+commits; cleanup failure retains it and records `cleanup-incomplete`. Missing
+quiescence or compensation refuses before mutation.
 
 Affected supervised tasks use their declared `never`, `manual`, `safe-point`,
-`drain`, `rolling`, or `immediate` policy. `never` and unapproved `manual`
-plans refuse before mutation; each attempted task outcome is journaled.
+`drain`, `rolling`, or `immediate` policy. `never`, unapproved `manual`, stale
+zero-argument rolling readiness, rolling replacement that depends on an
+unpublished staged definition, and decorated definition reconciliation refuse
+before publication. Decorator registration must live in adapter-owned
+composition. Each attempted task outcome is journaled.
 
 `dynra_lifecycle_plan` never mutates runtime state. A reconciliation rebuilds
 only the affected dependency subgraph; unchanged prerequisites retain object

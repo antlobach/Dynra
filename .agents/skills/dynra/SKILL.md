@@ -171,17 +171,22 @@ A lifecycle plan is mandatory before mutation. Check:
 - required process restart;
 - evidence-backed refusals.
 
-Adapters prepare and validate replacements before the atomic holder swap. A
-pre-swap failure leaves the old system active. A post-swap failure triggers
-holder rollback and compensation when safe. The journal identifies
-`old-system-active`, `old-system-restored`, `new-system-committed`, or
-`manual-recovery-required`. Do not continue automatically after manual recovery
-is required.
+Adapters prepare and validate replacements before definition or holder
+publication. A pre-swap failure leaves the old system active. A post-swap
+failure triggers holder rollback and compensation when safe. The journal
+identifies `old-system-active`, `old-system-restored`, `new-system-committed`,
+or `manual-recovery-required`. Do not continue automatically after manual
+recovery is required.
 
 When `source_after` contains a managed definition, reconciliation quiesces the
-affected components and applies the definition before preparing replacements.
-Definition and resource rollback share one transaction boundary. Missing
-quiescence is a refusal; never apply the definition separately first.
+affected components and compiles candidates outside the live module.
+Adapters must consume candidates from `ChangeSet.staged_definitions`; they must
+not read the old live global while preparing. Definitions publish only after all
+replacements validate. Decorated definitions refuse because replaying or
+stripping decorators changes external registration semantics; move registration
+into adapter-owned composition. Definition and resource rollback share one
+transaction boundary. Missing quiescence or compensation is a refusal; never
+apply the definition separately first.
 
 Only the affected component subgraph is rebuilt; dependencies outside it must
 retain identity. Read related components and bindings from one

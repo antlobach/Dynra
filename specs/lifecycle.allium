@@ -20,7 +20,7 @@ contract DeterministicImpactPlanning {
     @invariant HolderEvidence
         -- Every known holder is managed or reported as an exact unmanaged refusal.
     @invariant UnsafePlansRefuse
-        -- Missing semantics, cycles, unmanaged holders, restart-only bindings, and disallowed task policies refuse before mutation.
+        -- Missing semantics, cycles, unmanaged holders, decorated definitions, restart-only bindings, and disallowed task policies refuse before publication.
 }
 
 contract FailureAtomicAdapterActivation {
@@ -38,9 +38,11 @@ contract FailureAtomicAdapterActivation {
 contract TransactionalReconciliation {
     reconcile: (runtime: Runtime, plan: Any) -> Any
     @invariant PrepareBeforeVisibility
-        -- Every replacement and validation completes before visibility changes.
+        -- Definitions stage outside live modules; every replacement and validation completes before staged definitions and the managed generation become visible.
+    @invariant SerializedTransactions
+        -- Reconciliations serialize per runtime and per shared live framework resource.
     @invariant AtomicGenerationVisibility
-        -- Readers observe one complete old or new generation, never a mixed set.
+        -- Readers observe one complete old or new managed generation, never a mixed set.
     @invariant PreSwapRecovery
         -- Failure resumes every old component and disposes every prepared replacement in reverse dependency order.
     @invariant PostSwapCompensation
@@ -76,7 +78,7 @@ contract SupervisedTaskReconciliation {
     @invariant DrainOrdering
         -- Drain stops new work before waiting for active work.
     @invariant RollingReadiness
-        -- Rolling replacement proves readiness before old-task cancellation.
+        -- Rolling readiness receives and proves the specific replacement task before old-task cancellation; stale zero-argument readiness refuses.
     @invariant JournalTaskOutcome
         -- Every affected task and outcome appears in the journal.
 }

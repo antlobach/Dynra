@@ -251,6 +251,118 @@ def patch_class(old_cls, new_cls, safe_mode=True):
     return True
 
 
+def _function_with_globals(function, namespace):
+    rebound = types.FunctionType(
+        function.__code__,
+        namespace,
+        function.__name__,
+        function.__defaults__,
+        function.__closure__,
+    )
+    rebound.__kwdefaults__ = function.__kwdefaults__
+    rebound.__annotations__ = dict(function.__annotations__)
+    rebound.__dict__.update(function.__dict__)
+    rebound.__doc__ = function.__doc__
+    rebound.__module__ = function.__module__
+    rebound.__qualname__ = function.__qualname__
+    return rebound
+
+
+def _definition_with_globals(value, namespace):
+    if isinstance(value, types.FunctionType):
+        return _function_with_globals(value, namespace)
+    if not isinstance(value, type):
+        return value
+    for name, attribute in tuple(value.__dict__.items()):
+        replacement = None
+        if isinstance(attribute, types.FunctionType):
+            replacement = _function_with_globals(attribute, namespace)
+        elif isinstance(attribute, staticmethod):
+            replacement = staticmethod(
+                _function_with_globals(attribute.__func__, namespace)
+            )
+        elif isinstance(attribute, classmethod):
+            replacement = classmethod(
+                _function_with_globals(attribute.__func__, namespace)
+            )
+        elif isinstance(attribute, property):
+            accessors = (
+                _function_with_globals(accessor, namespace)
+                if isinstance(accessor, types.FunctionType)
+                else accessor
+                for accessor in (
+                    attribute.fget,
+                    attribute.fset,
+                    attribute.fdel,
+                )
+            )
+            replacement = property(*accessors, doc=attribute.__doc__)
+        if replacement is not None:
+            setattr(value, name, replacement)
+    return value
+
+
+
+def _canonicalize_staged_references(value, replacements, seen=None):
+    seen = seen if seen is not None else set()
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    if isinstance(value, types.FunctionType):
+        if value.__defaults__:
+            value.__defaults__ = tuple(
+                replacements.get(id(item), item)
+                for item in value.__defaults__
+            )
+        if value.__kwdefaults__:
+            value.__kwdefaults__ = {
+                name: replacements.get(id(item), item)
+                for name, item in value.__kwdefaults__.items()
+            }
+        value.__annotations__ = {
+            name: replacements.get(id(item), item)
+            for name, item in value.__annotations__.items()
+        }
+        for cell in value.__closure__ or ():
+            try:
+                contents = cell.cell_contents
+            except ValueError:
+                continue
+            replacement = replacements.get(id(contents))
+            if replacement is not None:
+                cell.cell_contents = replacement
+        return
+    if not isinstance(value, type):
+        return
+    bases = tuple(replacements.get(id(base), base) for base in value.__bases__)
+    if bases != value.__bases__:
+        value.__bases__ = bases
+    annotations = inspect.get_annotations(value, eval_str=False)
+    if annotations:
+        value.__annotations__ = {
+            name: replacements.get(id(item), item)
+            for name, item in annotations.items()
+        }
+    for name, attribute in tuple(value.__dict__.items()):
+        if id(attribute) in replacements:
+            setattr(value, name, replacements[id(attribute)])
+        elif isinstance(attribute, (types.FunctionType, type)):
+            _canonicalize_staged_references(attribute, replacements, seen)
+        elif isinstance(attribute, (staticmethod, classmethod)):
+            _canonicalize_staged_references(
+                attribute.__func__, replacements, seen
+            )
+        elif isinstance(attribute, property):
+            for accessor in (
+                attribute.fget,
+                attribute.fset,
+                attribute.fdel,
+            ):
+                if accessor is not None:
+                    _canonicalize_staged_references(
+                        accessor, replacements, seen
+                    )
+
 @dataclass
 class DefinitionSnapshot:
     module: str
@@ -483,39 +595,353 @@ class NamespaceManager:
         self, changes: ChangeSet, *, approved: bool = False
     ):
         """Apply definitions and managed resources under one rollback boundary."""
-        self._track_lifecycle_holders(changes)
         targets = tuple(
-            target for target in changes.definitions if target in changes.source_after
+            target
+            for target in changes.definitions
+            if target in changes.source_after
         )
-        snapshots = {
-            target: self._capture_snapshot(*self._resolve_target(target))
-            for target in targets
-        }
-        undo_lengths = {key: len(stack) for key, stack in self._undo_stacks.items()}
-        live_sources = dict(self._live_sources)
-        source_bases = dict(self._source_bases)
-        module_generations = dict(self._module_generations)
-        original_module = self.current_name
+        deleted = object()
+        staged_definitions: dict[str, object] = {}
+        publication_definitions: dict[str, object] = {}
+        snapshots: dict[str, DefinitionSnapshot] = {}
+        undo_lengths: dict[tuple[str, str], int] = {}
+        live_sources: dict[tuple[str, str], str] = {}
+        source_bases: dict[tuple[str, str], str] = {}
+        module_generations: dict[str, int] = {}
+        original_module: list[str | None] = [None]
+
+        def initialize_transaction():
+            self._track_lifecycle_holders(changes)
+            snapshots.update(
+                {
+                    target: self._capture_snapshot(
+                        *self._resolve_target(target)
+                    )
+                    for target in targets
+                }
+            )
+            undo_lengths.update(
+                {
+                    key: len(stack)
+                    for key, stack in self._undo_stacks.items()
+                }
+            )
+            live_sources.update(self._live_sources)
+            source_bases.update(self._source_bases)
+            module_generations.update(self._module_generations)
+            original_module[0] = self.current_name
+
+        def stage_definitions():
+            parsed_sources = {
+                target: ast.parse(changes.source_after[target])
+                for target in targets
+                if changes.source_after[target]
+            }
+            target_names = {
+                (
+                    self._resolve_target(target)[0],
+                    self._resolve_target(target)[1],
+                ): target
+                for target in targets
+            }
+            dependencies: dict[str, set[str]] = {
+                target: set() for target in targets
+            }
+            def eager_expressions(node):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    expressions = [
+                        *node.decorator_list,
+                        *node.args.defaults,
+                        *(
+                            item
+                            for item in node.args.kw_defaults
+                            if item is not None
+                        ),
+                        *(
+                            argument.annotation
+                            for argument in (
+                                *node.args.posonlyargs,
+                                *node.args.args,
+                                *node.args.kwonlyargs,
+                            )
+                            if argument.annotation is not None
+                        ),
+                    ]
+                    if node.args.vararg and node.args.vararg.annotation:
+                        expressions.append(node.args.vararg.annotation)
+                    if node.args.kwarg and node.args.kwarg.annotation:
+                        expressions.append(node.args.kwarg.annotation)
+                    if node.returns is not None:
+                        expressions.append(node.returns)
+                    return expressions
+                if isinstance(node, ast.ClassDef):
+                    expressions = [
+                        *node.decorator_list,
+                        *node.bases,
+                        *(keyword.value for keyword in node.keywords),
+                    ]
+                    for statement in node.body:
+                        if isinstance(
+                            statement,
+                            (
+                                ast.FunctionDef,
+                                ast.AsyncFunctionDef,
+                                ast.ClassDef,
+                            ),
+                        ):
+                            expressions.extend(eager_expressions(statement))
+                        else:
+                            expressions.append(statement)
+                    return expressions
+                return []
+
+            for target, tree in parsed_sources.items():
+                module_name, definition = self._resolve_target(target)
+                node = next(
+                    (
+                        item
+                        for item in tree.body
+                        if isinstance(
+                            item,
+                            (
+                                ast.FunctionDef,
+                                ast.AsyncFunctionDef,
+                                ast.ClassDef,
+                            ),
+                        )
+                        and item.name == definition
+                    ),
+                    None,
+                )
+                eager = eager_expressions(node)
+                for expression in eager:
+                    for item in ast.walk(expression):
+                        if isinstance(item, ast.Name) and isinstance(
+                            item.ctx, ast.Load
+                        ):
+                            dependency = target_names.get(
+                                (module_name, item.id)
+                            )
+                            if dependency is not None and dependency != target:
+                                dependencies[target].add(dependency)
+                        elif (
+                            isinstance(item, ast.Attribute)
+                            and isinstance(item.ctx, ast.Load)
+                            and isinstance(item.value, ast.Name)
+                        ):
+                            referenced = sys.modules[module_name].__dict__.get(
+                                item.value.id
+                            )
+                            if isinstance(referenced, types.ModuleType):
+                                dependency = target_names.get(
+                                    (referenced.__name__, item.attr)
+                                )
+                                if (
+                                    dependency is not None
+                                    and dependency != target
+                                ):
+                                    dependencies[target].add(dependency)
+
+            ordered_targets = []
+            visiting = set()
+            visited = set()
+
+            def visit(target):
+                if target in visited:
+                    return
+                if target in visiting:
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "definition": target,
+                                "reason": (
+                                    "staged definitions have an eager "
+                                    "dependency cycle"
+                                ),
+                            },
+                        )
+                    )
+                visiting.add(target)
+                for dependency in dependencies[target]:
+                    visit(dependency)
+                visiting.remove(target)
+                visited.add(target)
+                ordered_targets.append(target)
+
+            for target in targets:
+                visit(target)
+            staged_namespaces: dict[str, dict] = {}
+            staged_modules: dict[str, types.ModuleType] = {}
+            for target in ordered_targets:
+                module_name, definition = self._resolve_target(target)
+                source = changes.source_after[target]
+                if not source:
+                    staged_definitions[target] = deleted
+                    continue
+                namespace = sys.modules[module_name].__dict__
+                staged_namespace = staged_namespaces.setdefault(
+                    module_name, dict(namespace)
+                )
+                for name, value in tuple(staged_namespace.items()):
+                    if not isinstance(value, types.ModuleType):
+                        continue
+                    if not any(
+                        target_module == value.__name__
+                        for target_module, _ in target_names
+                    ):
+                        continue
+                    staged_module = staged_modules.get(value.__name__)
+                    if staged_module is None:
+                        staged_module = types.ModuleType(value.__name__)
+                        staged_modules[value.__name__] = staged_module
+                    staged_module.__dict__.update(value.__dict__)
+                    staged_module.__dict__.update(
+                        staged_namespaces.get(value.__name__, {})
+                    )
+                    staged_namespace[name] = staged_module
+                tree = parsed_sources[target]
+                node = next(
+                    (
+                        item
+                        for item in tree.body
+                        if isinstance(
+                            item,
+                            (
+                                ast.FunctionDef,
+                                ast.AsyncFunctionDef,
+                                ast.ClassDef,
+                            ),
+                        )
+                        and item.name == definition
+                    ),
+                    None,
+                )
+                if node is not None and node.decorator_list:
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "definition": target,
+                                "reason": (
+                                    "decorated definitions cannot be "
+                                    "transactionally staged"
+                                ),
+                                "suggested_action": (
+                                    "restart or expose undecorated adapter "
+                                    "composition"
+                                ),
+                            },
+                        )
+                    )
+                code = compile(tree, f"<dynra-stage:{target}>", "exec")
+                exec(code, staged_namespace, staged_namespace)  # noqa: S102
+                if definition not in staged_namespace:
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "definition": target,
+                                "reason": (
+                                    "staged source did not define the target"
+                                ),
+                            },
+                        )
+                    )
+                staged_definitions[target] = staged_namespace[definition]
+                staged_module = staged_modules.get(module_name)
+                if staged_module is not None:
+                    staged_module.__dict__.update(staged_namespace)
+            projection = {}
+            for target in targets:
+                candidate = staged_definitions.get(target)
+                if candidate is None or candidate is deleted:
+                    continue
+                module_name, _ = self._resolve_target(target)
+                publication = _definition_with_globals(
+                    candidate, sys.modules[module_name].__dict__
+                )
+                publication_definitions[target] = publication
+                snapshot = snapshots[target]
+                patchable_function = (
+                    snapshot.kind == "function"
+                    and isinstance(candidate, types.FunctionType)
+                    and not analyze_function_patch_compatibility(
+                        snapshot.obj, candidate
+                    )
+                )
+                patchable_class = (
+                    snapshot.kind == "class"
+                    and isinstance(candidate, type)
+                    and not analyze_class_patch_compatibility(
+                        snapshot.obj, candidate
+                    )
+                )
+                if patchable_function or patchable_class:
+                    projection[id(candidate)] = snapshot.obj
+                    projection[id(publication)] = snapshot.obj
+                else:
+                    projection[id(candidate)] = publication
+                    if snapshot.exists:
+                        projection[id(snapshot.obj)] = publication
+            for target in targets:
+                candidate = staged_definitions.get(target)
+                if candidate is None or candidate is deleted:
+                    continue
+                _canonicalize_staged_references(candidate, projection)
+                publication = publication_definitions[target]
+                if publication is not candidate:
+                    _canonicalize_staged_references(
+                        publication, projection
+                    )
+            return staged_definitions
+
 
         def apply_definitions():
             self._lifecycle_reconciling = True
             for target in targets:
                 module_name, definition = self._resolve_target(target)
-                self.in_md(module_name)
-                source = changes.source_after[target]
-                if source:
-                    result = self.execute_code(source)
-                    if not result.success:
-                        raise result.error or ReconciliationRefused(
-                            (
-                                {
-                                    "definition": target,
-                                    "reason": "definition transaction was refused",
-                                },
-                            )
-                        )
-                else:
+                candidate = publication_definitions.get(
+                    target, staged_definitions[target]
+                )
+                if candidate is deleted:
+                    self.in_md(module_name)
                     self.unmap(definition)
+                    continue
+                namespace = sys.modules[module_name].__dict__
+                before = snapshots[target]
+                previous = before.obj
+                candidate = publication_definitions[target]
+                namespace[definition] = candidate
+                if before.exists and before.kind in {"function", "class"}:
+                    self._active_snapshot = before
+                    try:
+                        if not self._redefine_in_place(
+                            definition, previous, candidate, namespace
+                        ):
+                            raise ReconciliationRefused(
+                                (
+                                    {
+                                        "definition": target,
+                                        "reason": (
+                                            "staged definition is incompatible"
+                                        ),
+                                    },
+                                )
+                            )
+                    finally:
+                        self._active_snapshot = None
+                canonical = namespace.get(definition, candidate)
+                if before.exists:
+                    self._replace_mutable_references(
+                        previous, canonical, namespace
+                    )
+                    self._retarget_module_references(
+                        previous, canonical, module_name
+                    )
+                self._propagate_update(definition, canonical, module_name)
+                self._record_change(
+                    "patch" if before.exists else "define",
+                    before,
+                    changes.source_after[target],
+                )
 
         def rollback_definitions():
             for target in reversed(targets):
@@ -523,10 +949,13 @@ class NamespaceManager:
                 namespace = sys.modules[snapshot.module].__dict__
                 replacement = namespace.get(snapshot.name)
                 self._restore_snapshot(snapshot)
-                self._retarget_module_references(
-                    replacement, snapshot.obj, snapshot.module
-                )
-                self._replace_mutable_references(replacement, snapshot.obj, namespace)
+                if snapshot.exists:
+                    self._retarget_module_references(
+                        replacement, snapshot.obj, snapshot.module
+                    )
+                    self._replace_mutable_references(
+                        replacement, snapshot.obj, namespace
+                    )
             for key in list(self._undo_stacks):
                 keep = undo_lengths.get(key, 0)
                 del self._undo_stacks[key][keep:]
@@ -536,18 +965,31 @@ class NamespaceManager:
             self._source_bases = source_bases
             self._module_generations = module_generations
 
-        has_definition_changes = bool(targets)
-        try:
-            return await self.lifecycle.reconcile(
-                changes,
-                approved=approved,
-                apply=apply_definitions if has_definition_changes else None,
-                rollback=rollback_definitions if has_definition_changes else None,
-            )
-        finally:
+        def finish_transaction():
             self._lifecycle_reconciling = False
-            if original_module in sys.modules:
-                self.in_md(original_module)
+            if (
+                original_module[0] is not None
+                and original_module[0] in sys.modules
+            ):
+                self.in_md(original_module[0])
+
+        has_definition_changes = bool(targets)
+        module_resources = tuple(
+            {
+                sys.modules[self._resolve_target(target)[0]]
+                for target in targets
+            }
+        )
+        return await self.lifecycle.reconcile(
+            changes,
+            approved=approved,
+            before=initialize_transaction,
+            after=finish_transaction,
+            lock_resources=module_resources,
+            stage=stage_definitions if has_definition_changes else None,
+            apply=apply_definitions if has_definition_changes else None,
+            rollback=rollback_definitions if has_definition_changes else None,
+        )
 
     @property
     def commands(self):

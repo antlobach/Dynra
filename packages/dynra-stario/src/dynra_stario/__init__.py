@@ -5,15 +5,30 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+import types
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from stario import App
 
 from dynra.lifecycle import ChangeSet, ReconciliationRefused, RuntimeView
 
+
+def _cell(value: object) -> types.CellType:
+    closure = (lambda: value).__closure__
+    assert closure is not None
+    return closure[0]
+
+
+def _replace_cell(cell, replacements):
+    try:
+        contents = cell.cell_contents
+    except ValueError:
+        return cell
+    replacement = replacements.get(id(contents))
+    return _cell(replacement) if replacement is not None else cell
 
 @dataclass(frozen=True)
 class _CallableRef:
@@ -29,17 +44,77 @@ class _CallableRef:
             function,
         )
 
-    def resolve(self) -> Callable[..., Any]:
-        if not self.module or "<locals>" in self.qualname:
-            return self.fallback
-        value: Any = importlib.import_module(self.module)
-        try:
-            for segment in self.qualname.split("."):
-                value = getattr(value, segment)
-        except AttributeError:
-            return self.fallback
+    def resolve(
+        self, staged_definitions: Mapping[str, Any] | None = None
+    ) -> Callable[..., Any]:
+        target = f"{self.module}.{self.qualname}"
+        staged = (staged_definitions or {}).get(target)
+        if callable(staged):
+            value: Any = staged
+        elif not self.module or "<locals>" in self.qualname:
+            value = self.fallback
+        else:
+            value = importlib.import_module(self.module)
+            try:
+                for segment in self.qualname.split("."):
+                    value = getattr(value, segment)
+            except AttributeError:
+                value = self.fallback
+        if isinstance(value, types.FunctionType) and staged_definitions:
+            prefix = f"{self.module}."
+            overlay = {
+                name.removeprefix(prefix): candidate
+                for name, candidate in staged_definitions.items()
+                if name.startswith(prefix)
+                and "." not in name.removeprefix(prefix)
+            }
+            if overlay:
+                namespace = dict(value.__globals__)
+                replacements = {
+                    id(namespace[name]): candidate
+                    for name, candidate in overlay.items()
+                    if name in namespace
+                }
+                namespace.update(overlay)
+                defaults = (
+                    tuple(
+                        replacements.get(id(item), item)
+                        for item in value.__defaults__
+                    )
+                    if value.__defaults__
+                    else None
+                )
+                closure = (
+                    tuple(
+                        _replace_cell(cell, replacements)
+                        for cell in value.__closure__
+                    )
+                    if value.__closure__
+                    else None
+                )
+                clone = types.FunctionType(
+                    value.__code__,
+                    namespace,
+                    value.__name__,
+                    defaults,
+                    closure,
+                )
+                clone.__kwdefaults__ = (
+                    {
+                        name: replacements.get(id(item), item)
+                        for name, item in value.__kwdefaults__.items()
+                    }
+                    if value.__kwdefaults__
+                    else None
+                )
+                clone.__annotations__ = {
+                    name: replacements.get(id(item), item)
+                    for name, item in value.__annotations__.items()
+                }
+                clone.__dict__.update(value.__dict__)
+                clone.__qualname__ = value.__qualname__
+                return clone
         return value if callable(value) else self.fallback
-
 
 @dataclass
 class _RequestControl:
@@ -66,7 +141,9 @@ _CANDIDATES: weakref.WeakSet[App] = weakref.WeakSet()
 _ORIGINAL_ADD = App.add
 _ORIGINAL_CALL = App.__call__
 _ORIGINAL_FIND_HANDLER = App.find_handler
-_ORIGINAL_HOST_ROUTING = App.host_routing.fget
+_ORIGINAL_HOST_ROUTING = cast(
+    Callable[[App], bool], App.host_routing.fget
+)
 
 
 def _control(app: App) -> _RequestControl:
@@ -110,18 +187,20 @@ def _install_route_recorder() -> None:
         return await _ORIGINAL_CALL(self, context, writer)
 
     def routed_find_handler(self, host, path, method):
-        router = _PUBLISHED_ROUTERS.get(self, self)
+        router = _PUBLISHED_ROUTERS.get(self) or self
         return _ORIGINAL_FIND_HANDLER(router, host, path, method)
 
     def routed_host_routing(self):
-        router = _PUBLISHED_ROUTERS.get(self, self)
+        router = _PUBLISHED_ROUTERS.get(self) or self
         return _ORIGINAL_HOST_ROUTING(router)
 
-    tracked_add.__dynra_route_recorder__ = True
+    tracked_add.__dynra_route_recorder__ = True  # pyright: ignore[reportFunctionMemberAccess]
     App.add = tracked_add
-    App.__call__ = gated_call
+    App.__call__ = gated_call  # pyright: ignore[reportAttributeAccessIssue]
     App.find_handler = routed_find_handler
-    App.host_routing = property(routed_host_routing)
+    App.host_routing = property(  # pyright: ignore[reportAttributeAccessIssue]
+        routed_host_routing
+    )
 
 
 _install_route_recorder()
@@ -253,10 +332,15 @@ class StarioAdapter:
                         },
                     )
                 )
-            _control(app).gate.clear()
-            # Requests admitted before the clear run synchronously through router
-            # selection before yielding; later requests wait at the gate.
-            await asyncio.sleep(0)
+            control = _control(app)
+            control.gate.clear()
+            try:
+                # Requests admitted before the clear run synchronously through
+                # router selection before yielding; later requests wait.
+                await asyncio.sleep(0)
+            except BaseException:
+                control.gate.set()
+                raise
 
         await self._on_owner(quiesce_on_owner)
 
@@ -323,7 +407,9 @@ class StarioAdapter:
             _CANDIDATES.add(candidate)
             if composers:
                 for composer in composers:
-                    result = composer.resolve()(candidate)
+                    result = composer.resolve(
+                        changes.staged_definitions
+                    )(candidate)
                     if asyncio.iscoroutine(result):
                         await result
             else:
@@ -331,8 +417,11 @@ class StarioAdapter:
                     _ORIGINAL_ADD(
                         candidate,
                         route,
-                        handler.resolve(),
-                        middleware=tuple(item.resolve() for item in middleware),
+                        handler.resolve(changes.staged_definitions),
+                        middleware=tuple(
+                            item.resolve(changes.staged_definitions)
+                            for item in middleware
+                        ),
                     )
             return candidate
 
@@ -340,7 +429,8 @@ class StarioAdapter:
 
     async def migrate(self, replacement: App, snapshot: object) -> None:
         async def migrate_on_owner():
-            replacement._error_handlers = dict(snapshot["error_handlers"])
+            state = cast(Mapping[str, Any], snapshot)
+            replacement._error_handlers = dict(state["error_handlers"])
             replacement._find_error_handler.cache_clear()
 
         await self._on_owner(migrate_on_owner)
@@ -361,6 +451,8 @@ class StarioAdapter:
         await self._on_owner(validate_on_owner)
 
     def publication(self, replacement: App) -> App:
+        if self._app is None:
+            raise RuntimeError("Stario adapter is not activated")
         return self._app
 
     async def commit(self, replacement: App) -> None:
@@ -381,12 +473,13 @@ class StarioAdapter:
         return None
 
     async def compensate(self, failure: BaseException) -> None:
-        if self._snapshot is None or self._app is None:
+        snapshot = self._snapshot
+        app = self._app
+        if snapshot is None or app is None:
             raise RuntimeError("Stario compensation state is unavailable")
 
         async def compensate_on_owner():
-            assert self._app is not None
-            _PUBLISHED_ROUTERS[self._app] = self._snapshot["router"]
+            _PUBLISHED_ROUTERS[app] = snapshot["router"]
 
         await self._on_owner(compensate_on_owner)
 
