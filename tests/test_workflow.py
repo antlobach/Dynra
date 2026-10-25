@@ -114,6 +114,17 @@ def test_failed_multi_definition_patch_rolls_back_every_definition(tmp_path):
         assert module.second is original_second
         assert module.registry[0] is original_second
         assert manager.history[-1]["action"] == "transaction"
+        events = manager.events()
+        failed_events = events[-2:]
+        assert failed_events[0]["action"] == "refused"
+        assert failed_events[1]["action"] == "transaction"
+        assert failed_events[1]["status"] == "rolled-back"
+        assert manager.events(after=failed_events[0]["sequence"], limit=1) == (
+            failed_events[1],
+        )
+        mutated = manager.events()[-1]
+        mutated["detail"]["result"] = "changed"
+        assert manager.events()[-1]["detail"]["result"] == "rolled-back"
     finally:
         sys.modules.pop("dynra_transaction", None)
 
@@ -261,6 +272,74 @@ def test_external_definition_edits_autoheal_without_reloading_importers(tmp_path
         for name in ("healpkg.consumer", "healpkg.logic", "healpkg"):
             sys.modules.pop(name, None)
 
+
+def test_external_sync_applies_declared_literals_and_reports_unsafe_changes(tmp_path):
+    package = tmp_path / "src" / "safesync"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source_file = package / "logic.py"
+    source_file.write_text(
+        "import math\n"
+        "calls = []\n"
+        "def decorate(fn):\n"
+        "    calls.append(fn.__name__)\n"
+        "    return fn\n"
+        "__dynra_reloadable__ = ('SETTING', 'BAD')\n"
+        "SETTING = 1\n"
+        "BAD = 2\n"
+        "UNDECLARED = 1\n"
+        "@decorate\n"
+        "def value():\n"
+        "    return SETTING\n",
+        encoding="utf-8",
+    )
+
+    manager = NamespaceManager(project_root=tmp_path)
+    module = manager.in_md("safesync.logic")
+    _attach_shell(manager, module)
+    manager.in_md("safesync.logic")
+    try:
+        source_file.write_text(
+            "import json\n"
+            "calls = []\n"
+            "def decorate(fn):\n"
+            "    calls.append(fn.__name__)\n"
+            "    return fn\n"
+            "def make_bad():\n"
+            "    raise RuntimeError('must not run')\n"
+            "__dynra_reloadable__ = ('SETTING', 'BAD')\n"
+            "SETTING = 3\n"
+            "BAD = make_bad()\n"
+            "UNDECLARED = 9\n"
+            "@missing_decorator\n"
+            "def value():\n"
+            "    return SETTING\n",
+            encoding="utf-8",
+        )
+
+        manager.in_md("safesync.logic")
+
+        report = manager.last_source_sync
+        assert report["status"] == "restart-required"
+        assert module.SETTING == 3
+        assert module.BAD == 2
+        assert module.UNDECLARED == 1
+        assert module.value() == 3
+        assert module.calls == ["value"]
+        assert "json" not in module.__dict__
+        assert {item["kind"] for item in report["restart_required"]} == {
+            "constant",
+            "decorators",
+            "imports",
+        }
+        assert any(
+            event["action"] == "source-sync"
+            and event["status"] == "restart-required"
+            for event in manager.events()
+        )
+    finally:
+        for name in ("safesync.logic", "safesync"):
+            sys.modules.pop(name, None)
 
 def test_external_edit_conflicts_with_live_patch_and_blocks_persistence(tmp_path):
     package = tmp_path / "src" / "conflictpkg"

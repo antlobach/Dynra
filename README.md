@@ -139,6 +139,9 @@ dynra_diff(runtime="", port=9999)
 dynra_persist(target="", runtime="", port=9999)
 dynra_revert(target, runtime="", port=9999)
 dynra_patch_log(runtime="", port=9999)
+dynra_events(after=0, limit=None, runtime="", port=9999)
+dynra_bootstrap(force=False, runtime="", port=9999)
+dynra_bootstrap_status(runtime="", port=9999)
 ```
 
 `runtime` accepts a runtime ID, unambiguous project path, or registered port.
@@ -213,7 +216,13 @@ def __dynra_reconcile__(changes):
         rebuild_routes_in_place()
 ```
 
-Dynra does not rerun arbitrary assignments, imports, or top-level side effects. Constants and copied values retain normal Python semantics. If both disk and the REPL changed the same definition, Dynra keeps the live definition and reports a conflict instead of guessing. `persist_source()` uses the captured base definition and refuses to overwrite an external edit.
+Dynra does not rerun arbitrary assignments, imports, decorators, or top-level side effects. To opt a literal constant into safe source healing, declare it explicitly:
+
+```python
+__dynra_reloadable__ = ("TAX_RATE", "FEATURE_ENABLED")
+```
+
+Changed declared literals are copied into the live module. Undeclared assignments retain normal Python semantics. Import changes, decorator changes, removed declared constants, and declared non-literal values produce a structured `restart-required` result; Dynra never executes them during reconciliation. If both disk and the REPL changed the same definition, Dynra keeps the live definition and reports a conflict instead of guessing. `persist_source()` uses the captured base definition and refuses to overwrite an external edit.
 
 ## Live patch model
 
@@ -260,10 +269,11 @@ After the patch, existing `Session` instances use the new methods and run `__dyn
 | `class_patch_mode(mode=None)` | Read or set `safe` or `permissive` class patching. |
 | `unmap(name)` | Delete a binding and report remaining direct holders and qualified module aliases. |
 | `patch_log()` | Show applied, refused, reverted, and persisted operations. |
+| `events(after=0, limit=None)` | Read append-only structured audit events by sequence cursor. |
 | `revert(target)` / `revert_all()` | Restore one or all live definition snapshots; `target` may be the live function/class object or a qualified name. |
 | `diverged()` / `source_patch()` | Show unified diffs between live definitions and source files. |
 | `persist_source(target=None)` | Write exact evaluated definitions to their project source files. |
-| `source_sync_status(module=None)` | Show source freshness, conflicts, live definitions, and generation. |
+| `source_sync_status(module=None)` | Show source freshness, conflicts, applied outcomes, restart-required diagnostics, live definitions, and generation. |
 | `help_dynra()` | Show runtime help. |
 
 ## Terminal client

@@ -13,6 +13,7 @@ import types
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 
 from .project import ProjectLayout
 
@@ -276,12 +277,20 @@ class NamespaceManager:
         self.project = ProjectLayout.discover(project_root or os.getcwd())
         self.project.activate()
         self.synthetic_modules: set[str] = set()
-        self.history: list[dict] = []
+        self._events: list[dict] = []
+        self.history = self._events
         self._undo_stacks: dict[tuple[str, str], list[DefinitionSnapshot]] = {}
         self._live_sources: dict[tuple[str, str], str | None] = {}
         self._source_bases: dict[tuple[str, str], str | None] = {}
         self._source_snapshots: dict[str, dict[str, str]] = {}
         self._source_signatures: dict[str, tuple[int, int, int]] = {}
+        self._source_imports: dict[str, tuple[str, ...]] = {}
+        self._source_decorators: dict[str, dict[str, tuple[str, ...]]] = {}
+        self._source_constant_sources: dict[str, dict[str, str]] = {}
+        self._source_constant_values: dict[str, dict[str, object]] = {}
+        self._source_reloadable: dict[str, tuple[str, ...]] = {}
+        self._restart_required: dict[str, tuple[dict, ...]] = {}
+        self._source_outcomes: dict[str, tuple[dict, ...]] = {}
         self._source_conflicts: dict[str, tuple[str, ...]] = {}
         self._module_generations: dict[str, int] = {}
         self.last_source_sync: dict = {}
@@ -314,6 +323,7 @@ class NamespaceManager:
             "function_patch_mode": self.function_patch_mode,
             "unmap": self.unmap,
             "patch_log": self.patch_log,
+            "events": self.events,
             "revert": self.revert,
             "revert_all": self.revert_all,
             "diverged": self.diverged,
@@ -477,7 +487,7 @@ class NamespaceManager:
     def _read_module_definitions(self, name):
         info = self.project.modules.get(name)
         if info is None:
-            return None, {}
+            return None, {}, {}
         text = info.path.read_text(encoding="utf-8")
         tree = ast.parse(text)
         definitions = {
@@ -485,15 +495,69 @@ class NamespaceManager:
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         }
-        return info.path, definitions
+        imports = tuple(
+            ast.dump(node, include_attributes=False)
+            for node in tree.body
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        )
+        decorators = {
+            node.name: tuple(
+                ast.dump(decorator, include_attributes=False)
+                for decorator in node.decorator_list
+            )
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+        constant_sources = {}
+        constant_values = {}
+        reloadable = ()
+        for node in tree.body:
+            target = None
+            value = None
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target, value = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign):
+                target, value = node.target, node.value
+            if not isinstance(target, ast.Name) or value is None:
+                continue
+            source = ast.get_source_segment(text, node) or ast.unparse(node)
+            constant_sources[target.id] = source
+            try:
+                literal = ast.literal_eval(value)
+            except (ValueError, TypeError):
+                continue
+            constant_values[target.id] = literal
+            if target.id == "__dynra_reloadable__":
+                if not isinstance(literal, (tuple, list, set)) or not all(
+                    isinstance(item, str) and item.isidentifier() for item in literal
+                ):
+                    raise ValueError(
+                        "__dynra_reloadable__ must contain valid identifier strings"
+                    )
+                reloadable = tuple(sorted(set(literal)))
+        metadata = {
+            "imports": imports,
+            "decorators": decorators,
+            "constant_sources": constant_sources,
+            "constant_values": constant_values,
+            "reloadable": reloadable,
+        }
+        return info.path, definitions, metadata
 
     def _remember_module_source(self, name):
-        path, definitions = self._read_module_definitions(name)
+        path, definitions, metadata = self._read_module_definitions(name)
         if path is None:
             return
         self._source_snapshots[name] = definitions
+        self._source_imports[name] = metadata["imports"]
+        self._source_decorators[name] = metadata["decorators"]
+        self._source_constant_sources[name] = metadata["constant_sources"]
+        self._source_constant_values[name] = metadata["constant_values"]
+        self._source_reloadable[name] = metadata["reloadable"]
         self._source_signatures[name] = self._file_signature(path)
         self._source_conflicts.pop(name, None)
+        self._restart_required.pop(name, None)
+        self._source_outcomes.pop(name, None)
 
     def source_sync_status(self, module=None):
         name = module or self.current_name
@@ -505,7 +569,17 @@ class NamespaceManager:
                 if mod == name
             )
         )
-        status = "conflict" if conflicts else "live-newer" if live else "clean"
+        restart_required = self._restart_required.get(name, ())
+        outcomes = self._source_outcomes.get(name, ())
+        status = (
+            "conflict"
+            if conflicts
+            else "restart-required"
+            if restart_required
+            else "live-newer"
+            if live
+            else "clean"
+        )
         return {
             "module": name,
             "generation": self.module_generation(name),
@@ -513,6 +587,8 @@ class NamespaceManager:
             "conflicts": conflicts,
             "live": live,
             "changes": (),
+            "outcomes": outcomes,
+            "restart_required": restart_required,
         }
 
     def _remove_module_bindings(self, origin, obj):
@@ -527,7 +603,7 @@ class NamespaceManager:
         return tuple(sorted(removed))
 
     def reconcile_module_source(self, name=None):
-        """Apply external top-level definition edits to a loaded module."""
+        """Safely apply supported external edits and report restart boundaries."""
         module_name = name or self.current_name
         info = self.project.modules.get(module_name)
         if info is None or module_name not in sys.modules:
@@ -539,10 +615,14 @@ class NamespaceManager:
                 and module_name not in self._source_conflicts
             ):
                 return self.source_sync_status(module_name)
-            _, disk = self._read_module_definitions(module_name)
-        except (OSError, SyntaxError, UnicodeError) as error:
+            _, disk, metadata = self._read_module_definitions(module_name)
+        except (OSError, SyntaxError, UnicodeError, ValueError) as error:
             report = self.source_sync_status(module_name)
-            report.update(status="error", error=f"{type(error).__name__}: {error}")
+            message = f"{type(error).__name__}: {error}"
+            report.update(status="error", error=message)
+            self._record_event(
+                "source-sync", module_name, "*", {"error": message}, status="error"
+            )
             return report
 
         base = self._source_snapshots.get(module_name, {})
@@ -553,6 +633,53 @@ class NamespaceManager:
         }
         changes = []
         conflicts = []
+        restart_required = []
+        if self._source_imports.get(module_name, ()) != metadata["imports"]:
+            restart_required.append(
+                {
+                    "kind": "imports",
+                    "action": "restart-required",
+                    "reason": "top-level imports changed",
+                }
+            )
+        base_decorators = self._source_decorators.get(module_name, {})
+        for definition in sorted(set(base_decorators) & set(metadata["decorators"])):
+            if base_decorators.get(definition) != metadata["decorators"].get(definition):
+                restart_required.append(
+                    {
+                        "kind": "decorators",
+                        "definition": f"{module_name}.{definition}",
+                        "action": "restart-required",
+                        "reason": "decorator semantics were not re-applied",
+                    }
+                )
+
+        base_constant_sources = self._source_constant_sources.get(module_name, {})
+        namespace = sys.modules[module_name].__dict__
+        for constant in metadata["reloadable"]:
+            if base_constant_sources.get(constant) == metadata["constant_sources"].get(
+                constant
+            ):
+                continue
+            qualified = f"{module_name}.{constant}"
+            if constant not in metadata["constant_values"]:
+                restart_required.append(
+                    {
+                        "kind": "constant",
+                        "definition": qualified,
+                        "action": "restart-required",
+                        "reason": "reloadable constant is not a literal",
+                    }
+                )
+                continue
+            namespace[constant] = copy.deepcopy(metadata["constant_values"][constant])
+            changes.append(
+                {
+                    "definition": qualified,
+                    "action": "constant-updated",
+                }
+            )
+
         self._reconciling_source = True
         try:
             for definition in sorted(changed_names):
@@ -565,7 +692,7 @@ class NamespaceManager:
                     conflicts.append(f"{module_name}.{definition}")
                     continue
                 if disk_source is None:
-                    obj = sys.modules[module_name].__dict__.get(definition)
+                    obj = namespace.get(definition)
                     removed = (
                         self._remove_module_bindings(module_name, obj)
                         if isinstance(obj, (types.FunctionType, type))
@@ -582,6 +709,13 @@ class NamespaceManager:
                 if not self.shell:
                     conflicts.append(f"{module_name}.{definition}")
                     continue
+                if base_decorators.get(definition) != metadata["decorators"].get(
+                    definition
+                ):
+                    parsed_definition = ast.parse(disk_source).body[0]
+                    disk_source = "\n".join(
+                        disk_source.splitlines()[parsed_definition.lineno - 1 :]
+                    )
                 result = self.execute_code(disk_source)
                 if not result.success:
                     conflicts.append(f"{module_name}.{definition}")
@@ -599,10 +733,10 @@ class NamespaceManager:
 
         if changes:
             self._bump_module_generation(module_name)
-            hook = sys.modules[module_name].__dict__.get("__dynra_reconcile__")
+            hook = namespace.get("__dynra_reconcile__")
             if callable(hook):
                 try:
-                    hook(tuple(dict(change) for change in changes))
+                    hook(tuple(copy.deepcopy(change) for change in changes))
                 except Exception as error:
                     changes.append(
                         {
@@ -625,12 +759,49 @@ class NamespaceManager:
             self._source_bases.pop(key, None)
             self._undo_stacks.pop(key, None)
         self._source_snapshots[module_name] = snapshot
+        self._source_imports[module_name] = metadata["imports"]
+        self._source_decorators[module_name] = metadata["decorators"]
+        self._source_constant_sources[module_name] = metadata["constant_sources"]
+        self._source_constant_values[module_name] = metadata["constant_values"]
+        self._source_reloadable[module_name] = metadata["reloadable"]
         self._source_signatures[module_name] = signature
         if conflicts:
             self._source_conflicts[module_name] = tuple(sorted(conflicts))
         else:
             self._source_conflicts.pop(module_name, None)
-        status = "conflict" if conflicts else "healed" if changes else "clean"
+        if restart_required:
+            self._restart_required[module_name] = tuple(
+                copy.deepcopy(restart_required)
+            )
+        else:
+            self._restart_required.pop(module_name, None)
+        outcomes = tuple(copy.deepcopy(changes + restart_required))
+        self._source_outcomes[module_name] = outcomes
+        if changes or conflicts or restart_required:
+            self._record_event(
+                "source-sync",
+                module_name,
+                "*",
+                {
+                    "changes": changes,
+                    "conflicts": tuple(sorted(conflicts)),
+                    "restart_required": restart_required,
+                },
+                status="conflict"
+                if conflicts
+                else "restart-required"
+                if restart_required
+                else "applied",
+            )
+        status = (
+            "conflict"
+            if conflicts
+            else "restart-required"
+            if restart_required
+            else "healed"
+            if changes
+            else "clean"
+        )
         return {
             "module": module_name,
             "generation": self.module_generation(module_name),
@@ -638,6 +809,8 @@ class NamespaceManager:
             "conflicts": tuple(sorted(conflicts)),
             "live": self.source_sync_status(module_name)["live"],
             "changes": tuple(changes),
+            "outcomes": outcomes,
+            "restart_required": tuple(copy.deepcopy(restart_required)),
         }
 
     def reconcile_tracked_sources(self):
@@ -679,6 +852,14 @@ class NamespaceManager:
         aggregate["conflicts"] = tuple(
             conflict for report in reports for conflict in report["conflicts"]
         )
+        aggregate["outcomes"] = tuple(
+            outcome for report in reports for outcome in report.get("outcomes", ())
+        )
+        aggregate["restart_required"] = tuple(
+            diagnostic
+            for report in reports
+            for diagnostic in report.get("restart_required", ())
+        )
         errors = tuple(
             report["error"] for report in reports if report.get("error")
         )
@@ -687,6 +868,8 @@ class NamespaceManager:
             aggregate["errors"] = errors
         elif aggregate["conflicts"]:
             aggregate["status"] = "conflict"
+        elif aggregate["restart_required"]:
+            aggregate["status"] = "restart-required"
         elif aggregate["changes"]:
             aggregate["status"] = "healed"
         return aggregate
@@ -801,6 +984,7 @@ class NamespaceManager:
   class_patch_mode()       - Get/set safe|permissive class patching
   unmap(name)              - Remove a definition and report remaining holders
   patch_log()              - Show applied, refused, reverted, and persisted changes
+  events([after], [limit]) - Read immutable structured audit events by cursor
   revert(target)           - Undo the latest change to a definition
   revert_all()             - Undo all live changes
   diverged()               - Show live definitions that differ from disk
@@ -974,28 +1158,44 @@ class NamespaceManager:
         self._undo_stacks.setdefault(key, []).append(before)
         self._live_sources[key] = source
         self._bump_module_generation(before.module)
-        self.history.append(
+        self._events.append(
             {
                 "sequence": self._sequence,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "action": action,
                 "status": "applied",
                 "module": before.module,
                 "name": before.name,
+                "generation": self.module_generation(before.module),
             }
         )
 
-    def _record_event(self, action, module, name, detail=""):
+    def _record_event(self, action, module, name, detail=None, status="recorded"):
         self._sequence += 1
-        self.history.append(
-            {
-                "sequence": self._sequence,
-                "action": action,
-                "status": "recorded",
-                "module": module,
-                "name": name,
-                "detail": detail,
-            }
-        )
+        event = {
+            "sequence": self._sequence,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "status": status,
+            "module": module,
+            "name": name,
+            "generation": self.module_generation(module),
+        }
+        if detail not in (None, ""):
+            event["detail"] = copy.deepcopy(detail)
+        self._events.append(event)
+
+    def events(self, after=0, limit=None):
+        if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+            raise ValueError("after must be a non-negative integer")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise ValueError("limit must be a positive integer or None")
+        selected = [event for event in self._events if event["sequence"] > after]
+        if limit is not None:
+            selected = selected[:limit]
+        return tuple(copy.deepcopy(event) for event in selected)
 
     def _internal_holder_ids(self):
         ids = {id(self.prev_objects), id(self.history), id(self._undo_stacks)}
@@ -1109,7 +1309,6 @@ class NamespaceManager:
             name: self._capture_snapshot(module_name, name)
             for name in definition_names
         }
-        history_length = len(self.history)
         undo_lengths = {key: len(stack) for key, stack in self._undo_stacks.items()}
         live_sources = dict(self._live_sources)
         source_bases = dict(self._source_bases)
@@ -1150,7 +1349,8 @@ class NamespaceManager:
                 namespace.pop(result_name, None)
                 for snapshot in transaction.values():
                     self._restore_snapshot(snapshot)
-                del self.history[history_length:]
+                # Audit events are append-only; the rollback event below records
+                # that earlier events in this transaction did not remain applied.
                 for key in list(self._undo_stacks):
                     keep = undo_lengths.get(key, 0)
                     del self._undo_stacks[key][keep:]
@@ -1163,7 +1363,8 @@ class NamespaceManager:
                     "transaction",
                     module_name,
                     ",".join(sorted(definition_names)),
-                    "rolled back",
+                    {"result": "rolled-back"},
+                    status="rolled-back",
                 )
                 return ManagedExecutionResult(
                     False,
@@ -1249,7 +1450,7 @@ class NamespaceManager:
         return result
 
     def patch_log(self):
-        snapshot = tuple(dict(entry) for entry in self.history)
+        snapshot = self.events()
         for entry in snapshot:
             print(json.dumps(entry, sort_keys=True))
         return snapshot
@@ -1383,7 +1584,9 @@ class NamespaceManager:
                     start, end = span
                     lines[start - 1 : end] = replacement
                 persisted.append(f"{module}.{name}")
-                self._record_event("persist", module, name, str(path))
+                self._record_event(
+                    "persist", module, name, {"path": str(path)}
+                )
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         persisted_modules = {module for _, _, _, module, _ in changes}
         for key in list(self._live_sources):
