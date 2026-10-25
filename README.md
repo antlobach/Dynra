@@ -47,37 +47,47 @@ flowchart LR
 
 ## Install and start
 
-Clone Dynra, then install it into the target project's Python environment:
-
-```bash
-git clone https://github.com/antlobach/Dynra.git /path/to/Dynra
-uv pip install --python /path/to/target-project/.venv/bin/python /path/to/Dynra
-```
-
-Start Dynra from the target project's root with that interpreter:
+Add Dynra as a development dependency of the target project:
 
 ```bash
 cd /path/to/target-project
-.venv/bin/dynra
+uv add --dev dynra
 ```
 
-The working directory matters. Dynra reads the target's `pyproject.toml`, activates its source roots, and indexes its Python modules without importing them. The runtime listens on `127.0.0.1:9999` by default. Use `dynra --port PORT` to start it on another port.
+Start Dynra from the target project's root:
+
+```bash
+uv run dynra
+```
+
+Dynra runs in the target project's virtual environment, so project dependencies
+are importable. It reads the target's `pyproject.toml`, activates its source
+roots, and indexes its Python modules without importing them. Dynra does not
+start the application; import or bootstrap the application explicitly when its
+live state is needed. The runtime listens on `127.0.0.1:9999` by default. Use
+`uv run dynra --port PORT` to select another port.
 
 ## Agents
 
 The repository includes a [Dynra agent skill](.agents/skills/dynra/SKILL.md). Give that skill to an agent that can call the MCP server. It defines the live-development loop, patching constraints, failure handling, and the point at which a verified live change should become a source edit.
 
-Configure the installed MCP adapter in an MCP-compatible coding agent, replacing the target environment path:
+In a project-local MCP configuration, run the installed adapter through the
+project environment:
 
 ```json
 {
   "mcpServers": {
     "dynra": {
-      "command": "/absolute/path/to/target-project/.venv/bin/dynra-mcp"
+      "command": "uv",
+      "args": ["run", "dynra-mcp"]
     }
   }
 }
 ```
+
+The MCP client must launch this command with the target project as its working
+directory. If the configuration is global, set its supported `cwd` option to
+the target project. Start `uv run dynra` separately before using the tool.
 
 The adapter exposes one tool:
 
@@ -221,10 +231,31 @@ Dynra executes arbitrary Python by design. Use it only for trusted local develop
 
 ## Development
 
+Develop Dynra in its own environment:
+
 ```bash
+git clone https://github.com/antlobach/Dynra.git
+cd Dynra
 uv sync --frozen --group dev
 uv run pytest -q
 uv build
+```
+
+To exercise an unreleased checkout from another project, install it there as an
+editable development dependency:
+
+```bash
+cd /path/to/target-project
+uv add --dev --editable /path/to/Dynra
+uv run dynra
+```
+
+Before committing that project's dependency files, replace the local path with
+the published package:
+
+```bash
+uv remove --dev dynra
+uv add --dev dynra
 ```
 
 CI runs the test suite on Python 3.10 through 3.14 and builds the package.

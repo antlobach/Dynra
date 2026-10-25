@@ -5,11 +5,31 @@ description = "Live Python runtime for LLM coding agents"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
+keywords = ["development", "live-coding", "mcp", "repl"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+]
 dependencies = [
     "ipython>=8.0",
     "mcp>=1.0,<2",
     "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/antlobach/Dynra"
+Documentation = "https://github.com/antlobach/Dynra#readme"
+Repository = "https://github.com/antlobach/Dynra"
+Issues = "https://github.com/antlobach/Dynra/issues"
 
 [project.scripts]
 dynra = "dynra.runtime:run_cli"
