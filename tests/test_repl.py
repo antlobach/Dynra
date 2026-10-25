@@ -1,10 +1,14 @@
+import socket
 import sys
 import time
 
 import pexpect
 
 
-
+def free_port():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
 
 def test_repl_source_healing_and_namespaces(tmp_path):
     package = tmp_path / "pkg"
@@ -15,9 +19,10 @@ def test_repl_source_healing_and_namespaces(tmp_path):
         "from pkg.mod_a import get_val\ndef check(): return get_val()\n"
     )
 
+    port = free_port()
     child = pexpect.spawn(
         sys.executable,
-        ["-m", "dynra"],
+        ["-m", "dynra", "--port", str(port)],
         cwd=str(tmp_path),
         encoding="utf-8",
         timeout=10,

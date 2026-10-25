@@ -67,6 +67,21 @@ start the application; import or bootstrap the application explicitly when its
 live state is needed. The runtime listens on `127.0.0.1:9999` by default. Use
 `uv run dynra --port PORT` to select another port.
 
+Each runtime registers its identity, project root, process, interpreter, and
+endpoint in the local Dynra registry after its socket is ready. Manage running
+runtimes without scanning ports:
+
+```bash
+dynra list
+dynra status RUNTIME_ID
+dynra stop RUNTIME_ID
+dynra clean
+```
+
+`status` and `stop` also accept an unambiguous port or project path. `clean`
+validates registered processes against the Dynra handshake and removes stale
+records. Set `DYNRA_RUNTIME_DIR` to override the registry location.
+
 ## Agents
 
 The repository includes a [Dynra agent skill](.agents/skills/dynra/SKILL.md). Give that skill to an agent that can call the MCP server. It defines the live-development loop, patching constraints, failure handling, and the point at which a verified live change should become a source edit.
