@@ -1,40 +1,53 @@
-import json
 import re
-import socket
 
 from mcp.server.fastmcp import FastMCP
+
+from .client import (
+    RuntimeConnectionError,
+    control_request,
+    discover_runtimes,
+    find_runtime,
+    request_runtime,
+)
 
 
 mcp = FastMCP("Dynra: live Python for coding agents")
 _MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 
 
-def send_code(code: str, host="127.0.0.1", port=9999, timeout=30.0):
-    """Send code to the trusted local Dynra runtime."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout) as connection:
-            connection.settimeout(timeout)
-            connection.sendall(code.encode("utf-8"))
-            connection.shutdown(socket.SHUT_WR)
-            response_data = bytearray()
-            while chunk := connection.recv(4096):
-                response_data.extend(chunk)
-            return json.loads(response_data.decode("utf-8"))
-    except ConnectionRefusedError:
-        return {
-            "error": (
-                f"Could not connect to the Dynra runtime at {host}:{port}. "
-                f"Start it with 'uv run dynra --port {port}'."
-            )
-        }
-    except TimeoutError:
-        return {"error": f"Dynra did not respond within {timeout:g} seconds."}
-    except Exception as error:
-        return {"error": str(error)}
-
-
 def _error_response(error):
-    return {"success": False, "error": error}
+    return {"success": False, "error": str(error)}
+
+
+def _validate_port(port):
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return f"Invalid port: {port!r}; expected an integer from 1 to 65535."
+    return None
+
+
+def _runtime_endpoint(runtime, port):
+    if runtime:
+        selected = find_runtime(runtime)
+        return selected["host"], selected["port"], selected["runtime_id"]
+    error = _validate_port(port)
+    if error:
+        raise ValueError(error)
+    return "127.0.0.1", port, None
+
+
+def _control(operation, *, runtime="", port=9999, **arguments):
+    try:
+        host, selected_port, runtime_id = _runtime_endpoint(runtime, port)
+        return control_request(
+            operation,
+            host=host,
+            port=selected_port,
+            runtime_id=runtime_id,
+            timeout=30.0,
+            **arguments,
+        )
+    except (RuntimeConnectionError, ValueError) as error:
+        return _error_response(error)
 
 
 def _compact_source_sync(source_sync, selected_module):
@@ -87,32 +100,108 @@ def _tool_response(response, module):
 
 
 @mcp.tool()
+def dynra_runtimes() -> dict:
+    """List live local Dynra runtimes registered by project and runtime ID."""
+    return {"success": True, "runtimes": list(discover_runtimes())}
+
+
+@mcp.tool()
+def dynra_status(runtime: str = "", port: int = 9999) -> dict:
+    """Return identity, project, generation, and source state for a runtime."""
+    return _control("status", runtime=runtime, port=port)
+
+
+@mcp.tool()
+def dynra_modules(runtime: str = "", port: int = 9999) -> dict:
+    """List discovered, loaded, synthetic, and external modules."""
+    return _control("modules", runtime=runtime, port=port)
+
+
+@mcp.tool()
+def dynra_symbols(module: str, runtime: str = "", port: int = 9999) -> dict:
+    """List public symbols without importing an unloaded project module."""
+    if not _MODULE_NAME.fullmatch(module):
+        return _error_response(f"Invalid Python module name: {module!r}")
+    return _control("symbols", runtime=runtime, port=port, module=module)
+
+
+@mcp.tool()
+def dynra_source(target: str, runtime: str = "", port: int = 9999) -> dict:
+    """Return source for a qualified project function or class."""
+    if not target.strip():
+        return _error_response("Target must not be empty.")
+    return _control("source", runtime=runtime, port=port, target=target)
+
+
+@mcp.tool()
+def dynra_diff(runtime: str = "", port: int = 9999) -> dict:
+    """Return live definitions that differ from project source files."""
+    return _control("diff", runtime=runtime, port=port)
+
+
+@mcp.tool()
+def dynra_persist(target: str = "", runtime: str = "", port: int = 9999) -> dict:
+    """Persist one qualified live definition, or every live definition."""
+    return _control(
+        "persist", runtime=runtime, port=port, target=target or None
+    )
+
+
+@mcp.tool()
+def dynra_revert(target: str, runtime: str = "", port: int = 9999) -> dict:
+    """Revert one qualified live definition to its previous snapshot."""
+    if not target.strip():
+        return _error_response("Target must not be empty.")
+    return _control("revert", runtime=runtime, port=port, target=target)
+
+
+@mcp.tool()
+def dynra_patch_log(runtime: str = "", port: int = 9999) -> dict:
+    """Return the runtime's structured patch and persistence history."""
+    return _control("patch_log", runtime=runtime, port=port)
+
+
+@mcp.tool()
+def dynra_evaluate(
+    code: str,
+    module: str = "user",
+    create: bool = False,
+    runtime: str = "",
+    port: int = 9999,
+) -> dict:
+    """Evaluate Python in a persistent live module."""
+    return _evaluate(code, module, create, runtime, port)
+
+
+def _evaluate(code, module, create, runtime, port):
+    if not _MODULE_NAME.fullmatch(module):
+        return _error_response(f"Invalid Python module name: {module!r}")
+    if not code.strip():
+        return _error_response("Code must not be empty.")
+    try:
+        host, selected_port, _ = _runtime_endpoint(runtime, port)
+        response = request_runtime(
+            {"module": module, "create": create},
+            host=host,
+            port=selected_port,
+            code=code,
+            timeout=30.0,
+        )
+    except (RuntimeConnectionError, ValueError) as error:
+        return _error_response(error)
+    return _tool_response(response, module)
+
+
+@mcp.tool()
 def dynra_repl(
     code: str, module: str = "user", create: bool = False, port: int = 9999
 ) -> dict:
-    """Evaluate Python in a persistent live module.
+    """Evaluate Python in a persistent runtime selected by port.
 
-    Pass the owning project module when inspecting or patching source. Imports
-    are strict: failures are returned instead of creating empty namespaces.
-    Set ``create=True`` only when intentionally creating a synthetic scratch
-    module. Select the matching long-running runtime with ``port``. State
-    persists between calls to the same runtime. Responses omit empty output,
-    repeated request metadata, and clean source state.
+    This compatibility tool preserves the original API. New integrations can
+    use ``dynra_evaluate`` with a discovered runtime ID.
     """
-    if not _MODULE_NAME.fullmatch(module):
-        return _error_response(f"Invalid Python module name: {module!r}")
-    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-        return _error_response(
-            f"Invalid port: {port!r}; expected an integer from 1 to 65535."
-        )
-    if not code.strip():
-        return _error_response("Code must not be empty.")
-
-    header = json.dumps(
-        {"module": module, "create": create}, separators=(",", ":")
-    )
-    response = send_code(f"DYNRA {header}\n{code}", port=port)
-    return _tool_response(response, module)
+    return _evaluate(code, module, create, "", port)
 
 
 def main():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -135,6 +136,29 @@ class DynraServer(threading.Thread):
     def stop(self):
         self.stopped.set()
 
+    def _structured_operation(self, operation, request):
+        output = io.StringIO()
+        with stdout_redirector(output):
+            if operation == "modules":
+                return self.manager.module_catalog()
+            if operation == "symbols":
+                return list(self.manager.dir_md(request.get("module")))
+            if operation == "source":
+                module, name = self.manager._resolve_target(request["target"])
+                loaded = self.manager.require_md(module)
+                return inspect.getsource(loaded.__dict__[name])
+            if operation == "diff":
+                return self.manager.diverged()
+            if operation == "persist":
+                return list(self.manager.persist_source(request.get("target")))
+            if operation == "revert":
+                module, name = self.manager._resolve_target(request["target"])
+                self.manager.revert(request["target"])
+                return f"{module}.{name}"
+            if operation == "patch_log":
+                return list(self.manager.patch_log())
+        raise ValueError(f"Unknown structured operation: {operation!r}.")
+
     def _control_request(self, request):
         if request.get("protocol") != PROTOCOL_VERSION:
             return {
@@ -164,11 +188,20 @@ class DynraServer(threading.Thread):
                 "runtime_id": self.runtime_id,
                 "stopping": True,
             }
-        return {
-            "success": False,
-            "error": f"Unknown Dynra operation: {operation!r}.",
-            "protocol": PROTOCOL_VERSION,
-        }
+        try:
+            result = self._structured_operation(operation, request)
+            return {
+                "success": True,
+                "protocol": PROTOCOL_VERSION,
+                "result": result,
+                "source_sync": self.manager.source_sync_status(),
+            }
+        except Exception as error:
+            return {
+                "success": False,
+                "protocol": PROTOCOL_VERSION,
+                "error": f"{type(error).__name__}: {error}",
+            }
 
     def _evaluate_request(self, payload):
         stdout, stderr = io.StringIO(), io.StringIO()
