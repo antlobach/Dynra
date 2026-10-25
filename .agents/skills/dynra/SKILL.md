@@ -194,11 +194,14 @@ component, and `RESTART` is a process boundary. Never reinterpret one kind as
 another.
 
 For Stario projects, install `dynra-stario` as a development dependency and
-start Dynra before application bootstrap. It tracks and rebuilds route and
-middleware composition while preserving the live App, listener, Relay, active
-requests, unaffected tasks, and streams. A changed running task requires an
-explicit `TaskSupervisor` policy or refuses. The adapter does not start or stop
-the application.
+load it before route registration. The development bootstrap must call
+`dynra_stario.compose_routes(app, build_routes)` around a side-effect-free route
+composer. Dynra then replays the current composer on the App's owner loop, gates
+new requests during reconciliation, and atomically publishes the replacement
+router while preserving the live App, listener, Relay, active requests,
+unaffected tasks, and streams. Production can call `build_routes(app)` directly.
+A changed running task requires an explicit `TaskSupervisor` policy or refuses.
+The adapter does not start or stop the application.
 
 Task replacement follows an explicit policy: `never`, `safe-point`, `immediate`,
 `drain`, `rolling`, or `manual`. Do not restart a task under a different policy

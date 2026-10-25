@@ -99,6 +99,10 @@ contract OptionalFrameworkAdapter {
         -- Routes, middleware, lifespan, tasks, requests, streams, and listener shutdown are explicit.
     @invariant PreserveLiveInfrastructure
         -- Unaffected databases, relays, listeners, and streams remain live.
+    @invariant ReplayableComposition
+        -- Framework route changes replay an explicit side-effect-free composition boundary; arbitrary bootstrap side effects never rerun.
+    @invariant OwnerLoopQuiescence
+        -- Reconciliation runs on the framework owner loop, gates new request admission, and publishes a complete router atomically.
 }
 
 surface LifecycleControl {

@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -195,10 +196,14 @@ class RuntimeGraph:
     def components(self) -> Mapping[str, ComponentRegistration]:
         return dict(self._components)
 
-    def register_component(self, registration: ComponentRegistration) -> None:
+    def register_component(
+        self, registration: ComponentRegistration, *, validate: bool = True
+    ) -> None:
         if registration.name in self._components:
             raise ValueError(f"Duplicate component: {registration.name}")
         self._components[registration.name] = registration
+        if not validate:
+            return
         try:
             self.order(self._components, include_dependencies=True)
         except Exception:
@@ -322,6 +327,7 @@ class JournalEntry:
     source_hashes: Mapping[str, Any]
     phases: list[Mapping[str, Any]] = field(default_factory=list)
     recovery: str = "old-system-active"
+    transaction_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class DurableJournal:
@@ -350,7 +356,9 @@ class DurableJournal:
     def persist(self, entry: JournalEntry) -> None:
         if not self.directory:
             return
-        target = self.directory / f"lifecycle-{entry.sequence:08d}.json"
+        target = self.directory / (
+            f"lifecycle-{entry.sequence:08d}-{entry.transaction_id}.json"
+        )
         fd, temporary = tempfile.mkstemp(prefix=target.name, dir=self.directory)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -378,9 +386,10 @@ class DurableJournal:
         removable = completed if keep == 0 else completed[:-keep]
         for entry in removable:
             if self.directory:
-                (self.directory / f"lifecycle-{entry.sequence:08d}.json").unlink(
-                    missing_ok=True
-                )
+                (
+                    self.directory
+                    / f"lifecycle-{entry.sequence:08d}-{entry.transaction_id}.json"
+                ).unlink(missing_ok=True)
             self.entries.remove(entry)
 
 
@@ -495,9 +504,12 @@ class LifecycleRuntime:
                 )
         staged = RuntimeGraph()
         for registration in existing.values():
-            staged.register_component(registration)
+            staged.register_component(registration, validate=False)
         for component, instance in discovered:
-            staged.register_component(ComponentRegistration(component, instance))
+            staged.register_component(
+                ComponentRegistration(component, instance), validate=False
+            )
+        staged.order(staged.components, include_dependencies=True)
         replacements = {
             f"component:{component.name}": instance
             for component, instance in discovered
@@ -555,6 +567,27 @@ class LifecycleRuntime:
                 )
             )
         )
+        for name in plan.affected_components:
+            adapter = self.graph.components[name].adapter
+            for operation in (
+                "quiesce",
+                "prepare",
+                "validate",
+                "commit",
+                "compensate",
+                "resume",
+            ):
+                if not callable(getattr(adapter, operation, None)):
+                    refusals.append(
+                        {
+                            "component": name,
+                            "operation": operation,
+                            "reason": (
+                                f"component adapter does not provide {operation}"
+                            ),
+                            "suggested_action": "add adapter semantics or restart",
+                        }
+                    )
         for name in affected_bindings:
             if self.bindings[name].kind is BindingKind.RESTART_ONLY:
                 restart = True
@@ -563,6 +596,37 @@ class LifecycleRuntime:
                         "binding": name,
                         "reason": "binding is classified as restart-only side effect",
                         "suggested_action": "restart",
+                    }
+                )
+            binding = self.bindings[name]
+            if binding.kind in {BindingKind.RECOMPUTE, BindingKind.REGISTRY}:
+                if binding.prepare is None:
+                    refusals.append(
+                        {
+                            "binding": name,
+                            "operation": "prepare",
+                            "reason": "binding does not provide safe preparation",
+                            "suggested_action": "add binding semantics or restart",
+                        }
+                    )
+                if binding.kind is BindingKind.REGISTRY and binding.validate is None:
+                    refusals.append(
+                        {
+                            "binding": name,
+                            "operation": "validate",
+                            "reason": "managed registry does not provide validation",
+                            "suggested_action": "add binding semantics or restart",
+                        }
+                    )
+            elif binding.kind is BindingKind.COMPONENT and (
+                not binding.component
+                or binding.component not in plan.affected_components
+            ):
+                refusals.append(
+                    {
+                        "binding": name,
+                        "reason": "component binding has no affected adapter",
+                        "suggested_action": "watch the owning component or restart",
                     }
                 )
         for name, kind in self.classifications.items():
@@ -657,6 +721,33 @@ class LifecycleRuntime:
             )
             plan = ImpactPlan(
                 **{**plan.as_dict(), "safe": not filtered, "refusals": filtered}
+            )
+        preflight_refusals = list(plan.refusals)
+        if len(plan.affected_components) > 1 or apply is not None:
+            for name in plan.affected_components:
+                adapter = self.graph.components[name].adapter
+                for operation in ("quiesce", "resume"):
+                    if not callable(getattr(adapter, operation, None)):
+                        preflight_refusals.append(
+                            {
+                                "component": name,
+                                "operation": operation,
+                                "reason": (
+                                    f"component adapter does not provide {operation}"
+                                ),
+                                "suggested_action": (
+                                    "add atomic quiescence semantics or restart"
+                                ),
+                            }
+                        )
+        if tuple(preflight_refusals) != plan.refusals:
+            plan = ImpactPlan(
+                **{
+                    **plan.as_dict(),
+                    "safe": False,
+                    "patched": (),
+                    "refusals": tuple(preflight_refusals),
+                }
             )
         entry = JournalEntry(
             len(self.journal) + 1, "planned", plan.as_dict(), changes.hashes()
@@ -855,7 +946,9 @@ class LifecycleRuntime:
                 reg.instance = old
                 try:
                     if swapped:
-                        await _invoke(reg.adapter, "compensate", error)
+                        await _invoke(
+                            reg.adapter, "compensate", error, required=True
+                        )
                     await _invoke(reg.adapter, "resume", old)
                 except BaseException as failure:  # noqa: BLE001 - cleanup must survive cancellation
                     compensation_errors.append(f"{reg.name}: {failure}")
@@ -973,13 +1066,52 @@ class TaskSupervisor:
                     )
                 )
             replacement = asyncio.create_task(self.factory(), name=self.name)
+            readiness_task = None
             try:
-                value = self.readiness()
-                await self._wait(
-                    value if inspect.isawaitable(value) else asyncio.sleep(0),
-                    "rolling readiness timeout",
+                try:
+                    accepts_replacement = bool(
+                        inspect.signature(self.readiness).parameters
+                    )
+                except (TypeError, ValueError):
+                    accepts_replacement = False
+                value = (
+                    self.readiness(replacement)
+                    if accepts_replacement
+                    else self.readiness()
                 )
+                readiness_task = asyncio.ensure_future(
+                    value if inspect.isawaitable(value) else asyncio.sleep(0)
+                )
+                done, _ = await asyncio.wait(
+                    {readiness_task, replacement},
+                    timeout=self.timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if readiness_task not in done:
+                    reason = (
+                        "rolling replacement exited before readiness"
+                        if replacement in done
+                        else "rolling readiness timeout"
+                    )
+                    raise ReconciliationRefused(
+                        ({"task": self.name, "reason": reason},)
+                    )
+                await readiness_task
+                if replacement.done():
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "task": self.name,
+                                "reason": (
+                                    "rolling replacement exited before readiness"
+                                ),
+                            },
+                        )
+                    )
             except BaseException:
+                if readiness_task is not None and not readiness_task.done():
+                    readiness_task.cancel()
+                    await asyncio.gather(readiness_task, return_exceptions=True)
                 replacement.cancel()
                 await asyncio.gather(replacement, return_exceptions=True)
                 raise
@@ -1003,6 +1135,10 @@ class TaskSupervisor:
             await asyncio.gather(prepared.old, return_exceptions=True)
         self.task = prepared.replacement
         self._safe_point.clear()
+        if prepared.resume_drain is not None:
+            value = prepared.resume_drain()
+            if inspect.isawaitable(value):
+                await value
 
     async def abort_restart(self, prepared: PreparedTaskRestart) -> None:
         if not prepared.replacement.done():

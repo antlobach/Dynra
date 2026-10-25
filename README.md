@@ -361,9 +361,13 @@ uv add --dev dynra-stario
 ```
 
 It preserves the loaded `stario.App`, listener, Relay, active requests,
-unaffected tasks, and streams while rebuilding tracked route and middleware
-composition. Start Dynra before application bootstrap so registrations are
-tracked. A changed running task is refused unless a Dynra `TaskSupervisor`
+unaffected tasks, and streams while atomically publishing rebuilt routes and
+middleware. In the development bootstrap, wrap only side-effect-free route
+registration in `dynra_stario.compose_routes(app, build_routes)`; the adapter
+replays that function without restarting listeners, databases, or tasks. The
+production bootstrap can continue to call `build_routes(app)` directly, so
+removing the development dependencies does not affect application startup.
+A changed running task is refused unless a Dynra `TaskSupervisor`
 defines its replacement policy; Dynra never rewrites suspended coroutine frames.
 
 Agents can inspect and operate lifecycle reconciliation without evaluating
@@ -378,9 +382,11 @@ dynra_lifecycle_journal(runtime="", port=9999)
 For a managed definition change, pass the qualified name and matching source
 text in `source_before` and `source_after`. Dynra quiesces the affected
 components, applies the definitions, prepares against the new definitions, and
-commits one component/binding generation. Any definition, preparation,
-validation, commit, or cleanup failure restores both definitions and managed
-resources. An adapter without the required quiescence operation is refused.
+commits one component/binding generation. Definition, preparation, validation,
+or commit failure restores definitions and managed resources when compensation
+succeeds. Cleanup runs after the new generation commits; cleanup failure retains
+the new generation and records `cleanup-incomplete`. An adapter without the
+required quiescence or compensation operation is refused before mutation.
 
 Affected supervised tasks use their declared `never`, `manual`, `safe-point`,
 `drain`, `rolling`, or `immediate` policy. `never` and unapproved `manual`

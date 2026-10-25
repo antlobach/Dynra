@@ -530,3 +530,135 @@ def test_successful_definition_response_includes_lifecycle_plan(tmp_path):
     assert result.success
     assert result.lifecycle_plan["safe"] is True
     assert result.lifecycle_plan["changed"] == ("planned_response.value",)
+
+
+def test_missing_adapter_semantics_refuse_before_mutation():
+    class IncompleteAdapter:
+        name = "incomplete"
+        watches = ("pkg.value",)
+        dependencies = ()
+
+    async def scenario():
+        runtime = LifecycleRuntime()
+        runtime.register_component(IncompleteAdapter(), object())
+        changes = ChangeSet(("pkg.value",))
+        plan = runtime.impact_plan(changes)
+        assert not plan.safe
+        assert {item["operation"] for item in plan.refusals} == {
+            "quiesce",
+            "prepare",
+            "validate",
+            "commit",
+            "compensate",
+            "resume",
+        }
+        applied = False
+
+        def apply():
+            nonlocal applied
+            applied = True
+
+        with pytest.raises(ReconciliationRefused):
+            await runtime.reconcile(changes, apply=apply, rollback=lambda: None)
+        assert not applied
+
+    asyncio.run(scenario())
+
+
+def test_adapter_activation_validates_dependencies_after_batch_discovery():
+    async def scenario():
+        database = Adapter("database")
+        worker = Adapter("worker", dependencies=("database",))
+        runtime = LifecycleRuntime(adapters=(worker, database))
+        assert await runtime.activate_adapters() == ("worker", "database")
+        assert set(runtime.graph.components) == {"database", "worker"}
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_journals_never_overwrite_transaction_files(tmp_path):
+    async def scenario():
+        first = LifecycleRuntime(journal_dir=tmp_path)
+        second = LifecycleRuntime(journal_dir=tmp_path)
+        await asyncio.gather(
+            first.reconcile(ChangeSet(("pkg.first",))),
+            second.reconcile(ChangeSet(("pkg.second",))),
+        )
+
+    asyncio.run(scenario())
+    paths = list(tmp_path.glob("lifecycle-*.json"))
+    assert len(paths) == 2
+    assert len({json.loads(path.read_text())["transaction_id"] for path in paths}) == 2
+
+
+def test_drain_restart_resumes_admission_after_commit():
+    async def worker():
+        await asyncio.Event().wait()
+
+    async def scenario():
+        events = []
+
+        def drain():
+            events.append("drain")
+
+            def resume():
+                events.append("resume")
+
+            return resume
+
+        supervisor = TaskSupervisor(
+            "worker",
+            worker,
+            TaskPolicy.DRAIN,
+            watches=("pkg.worker",),
+            drain=drain,
+        )
+        supervisor.start()
+        try:
+            await supervisor.restart()
+            assert events == ["drain", "resume"]
+        finally:
+            supervisor.task.cancel()
+            await asyncio.gather(supervisor.task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_rolling_readiness_receives_live_replacement_and_rejects_early_exit():
+    async def scenario():
+        seen = []
+
+        async def running_worker():
+            await asyncio.Event().wait()
+
+        async def ready(replacement):
+            seen.append(replacement)
+            await asyncio.sleep(0)
+
+        supervisor = TaskSupervisor(
+            "rolling",
+            running_worker,
+            TaskPolicy.ROLLING,
+            readiness=ready,
+        )
+        old = supervisor.start()
+        prepared = await supervisor.prepare_restart()
+        assert seen == [prepared.replacement]
+        await supervisor.commit_restart(prepared)
+        supervisor.task.cancel()
+        await asyncio.gather(supervisor.task, return_exceptions=True)
+        assert old.done()
+
+        async def exits():
+            return None
+
+        async def never_ready(replacement):
+            await asyncio.Event().wait()
+
+        failing = TaskSupervisor(
+            "exits", exits, TaskPolicy.ROLLING, readiness=never_ready
+        )
+        with pytest.raises(ReconciliationRefused, match="exited before readiness"):
+            await failing.prepare_restart()
+
+    asyncio.run(scenario())

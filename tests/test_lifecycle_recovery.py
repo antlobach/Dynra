@@ -17,6 +17,7 @@ def test_process_death_after_swap_reports_incomplete_cleanup(tmp_path):
             name = "service"
             dependencies = ()
             watches = ("app.handler",)
+            async def quiesce(self, instance): return None
             async def snapshot(self, instance): return instance
             async def prepare(self, changes): return {"version": 2}
             async def migrate(self, replacement, snapshot): return None
@@ -24,6 +25,7 @@ def test_process_death_after_swap_reports_incomplete_cleanup(tmp_path):
             async def commit(self, replacement): return None
             async def stop(self, instance): os._exit(73)
             async def compensate(self, failure): return None
+            async def resume(self, instance): return None
 
         async def main():
             runtime = LifecycleRuntime(journal_dir=sys.argv[1])
