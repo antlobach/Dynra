@@ -3,7 +3,18 @@ import sys
 
 import pexpect
 
-from dynra.mcp import dynra_repl
+from dynra.mcp import (
+    dynra_diff,
+    dynra_evaluate,
+    dynra_modules,
+    dynra_patch_log,
+    dynra_persist,
+    dynra_repl,
+    dynra_revert,
+    dynra_source,
+    dynra_status,
+    dynra_symbols,
+)
 
 
 def free_ports(count):
@@ -119,3 +130,55 @@ def test_agent_rejects_empty_code_without_response_noise():
         "success": False,
         "error": "Code must not be empty.",
     }
+
+
+def test_structured_runtime_tools(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source_file = package / "mod.py"
+    source_file.write_text(
+        "def value():\n    return 1\n",
+        encoding="utf-8",
+    )
+    port = free_ports(1)[0]
+    server = pexpect.spawn(
+        sys.executable,
+        ["-m", "dynra", "--port", str(port)],
+        cwd=str(tmp_path),
+        encoding="utf-8",
+    )
+    server.expect(r"user> ", timeout=10)
+    try:
+        status = dynra_status(port=port)
+        assert status["success"] is True
+        assert status["runtime"]["project_root"] == str(tmp_path.resolve())
+
+        modules = dynra_modules(port=port)
+        assert "pkg.mod" in modules["result"]["discovered"]
+        assert dynra_symbols("pkg.mod", port=port)["result"] == ["value"]
+        assert "def value()" in dynra_source("pkg.mod.value", port=port)["result"]
+
+        patched = dynra_evaluate(
+            module="pkg.mod",
+            code="def value():\n    return 2",
+            port=port,
+        )
+        assert patched["success"] is True
+        assert "pkg.mod.value" in dynra_diff(port=port)["result"]
+        assert dynra_patch_log(port=port)["result"][-1]["action"] == "patch"
+
+        reverted = dynra_revert("pkg.mod.value", port=port)
+        assert reverted["result"] == "pkg.mod.value"
+        assert dynra_evaluate(module="pkg.mod", code="value()", port=port)["result"] == "1"
+
+        dynra_evaluate(
+            module="pkg.mod",
+            code="def value():\n    return 3",
+            port=port,
+        )
+        persisted = dynra_persist("pkg.mod.value", port=port)
+        assert persisted["result"] == ["pkg.mod.value"]
+        assert "return 3" in source_file.read_text(encoding="utf-8")
+    finally:
+        server.terminate(force=True)
