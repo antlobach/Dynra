@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import inspect
 import io
@@ -18,6 +19,7 @@ from IPython.terminal.prompts import Prompts, Token
 
 from . import __version__
 from .core import NamespaceManager
+from .lifecycle import ChangeSet
 from .registry import (
     PROTOCOL_VERSION,
     RuntimeRecord,
@@ -168,6 +170,19 @@ class DynraServer(threading.Thread):
                 return self.manager.bootstrap(force=request.get("force", False))
             if operation == "bootstrap_status":
                 return self.manager.bootstrap_status()
+            if operation in {"lifecycle_plan", "lifecycle_reconcile"}:
+                changes = ChangeSet(
+                    definitions=tuple(request.get("definitions", ())),
+                    source_before=request.get("source_before", {}),
+                    source_after=request.get("source_after", {}),
+                )
+                if not changes.definitions:
+                    raise ValueError("definitions must not be empty")
+                if operation == "lifecycle_plan":
+                    return self.manager.lifecycle.impact_plan(changes).as_dict()
+                return asyncio.run(self.manager.lifecycle.reconcile(changes))
+            if operation == "lifecycle_journal":
+                return list(self.manager.lifecycle.journal_view())
         raise ValueError(f"Unknown structured operation: {operation!r}.")
 
     def _control_request(self, request):

@@ -13,6 +13,7 @@ Dynra provides interactive, REPL-driven Python development while preserving live
 - Automatic healing of external top-level function and class edits.
 - Per-module generations, source-sync reports, and conflict-safe persistence.
 - MCP, interactive terminal, and one-shot client interfaces.
+- Optional entry-point adapters, dependency-aware impact plans, transactional component replacement, supervised task policies, state migration, and durable lifecycle recovery journals.
 - CI and package builds on Python 3.10 through 3.14.
 
 ## Next
@@ -33,7 +34,7 @@ Document each refusal, the invariant it protects, and the safe recovery path. In
 
 ### Framework adapters
 
-Keep the core framework-neutral. Add adapters only where a framework requires operations that definition patching cannot express, such as deleting a route from a framework-owned registry.
+The framework-neutral lifecycle core and adapter entry-point contract are implemented. Concrete adapters remain separate development packages; add them only where framework-owned lifecycle semantics cannot be derived safely.
 
 ## Non-goals
 
