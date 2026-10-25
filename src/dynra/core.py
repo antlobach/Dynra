@@ -1,3 +1,5 @@
+import __future__
+
 import ast
 import builtins
 import copy
@@ -69,11 +71,15 @@ def _staging_expression_is_isolated(
 
 def _function_eager_expressions(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    include_annotations: bool,
 ) -> tuple[ast.AST, ...]:
     expressions: list[ast.AST] = [
         *node.args.defaults,
         *(item for item in node.args.kw_defaults if item is not None),
-        *(
+    ]
+    if include_annotations:
+        expressions.extend(
             argument.annotation
             for argument in (
                 *node.args.posonlyargs,
@@ -81,14 +87,13 @@ def _function_eager_expressions(
                 *node.args.kwonlyargs,
             )
             if argument.annotation is not None
-        ),
-    ]
-    if node.args.vararg and node.args.vararg.annotation:
-        expressions.append(node.args.vararg.annotation)
-    if node.args.kwarg and node.args.kwarg.annotation:
-        expressions.append(node.args.kwarg.annotation)
-    if node.returns is not None:
-        expressions.append(node.returns)
+        )
+        if node.args.vararg and node.args.vararg.annotation:
+            expressions.append(node.args.vararg.annotation)
+        if node.args.kwarg and node.args.kwarg.annotation:
+            expressions.append(node.args.kwarg.annotation)
+        if node.returns is not None:
+            expressions.append(node.returns)
     return tuple(expressions)
 
 
@@ -760,10 +765,19 @@ class NamespaceManager:
                 )
             else:
                 namespace = sys.modules[module_name].__dict__
+                compiler_flags = self._definition_future_flags(
+                    module_name, namespace.get(definition)
+                )
                 unsafe = next(
                     (
                         expression
-                        for expression in _function_eager_expressions(node)
+                        for expression in _function_eager_expressions(
+                            node,
+                            include_annotations=not bool(
+                                compiler_flags
+                                & __future__.annotations.compiler_flag
+                            ),
+                        )
                         if not _staging_expression_is_isolated(
                             expression, namespace
                         )
@@ -786,6 +800,52 @@ class NamespaceManager:
                         }
                     )
         return tuple(refusals)
+
+    def _module_future_flags(self, module_name: str) -> int:
+        annotations_flag = __future__.annotations.compiler_flag
+        info = self.project.modules.get(module_name)
+        if info is not None:
+            try:
+                tree = ast.parse(info.path.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError):
+                return 0
+            return (
+                annotations_flag
+                if any(
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "__future__"
+                    and any(
+                        alias.name == "annotations" for alias in node.names
+                    )
+                    for node in tree.body
+                )
+                else 0
+            )
+        shell_compiler = getattr(self.shell, "compile", None)
+        shell_flags = getattr(shell_compiler, "flags", 0)
+        if shell_flags & annotations_flag:
+            return annotations_flag
+        namespace = sys.modules[module_name].__dict__
+        return (
+            annotations_flag
+            if any(
+                isinstance(value, types.FunctionType)
+                and value.__module__ == module_name
+                and value.__code__.co_flags & annotations_flag
+                for value in namespace.values()
+            )
+            else 0
+        )
+
+    def _definition_future_flags(
+        self, module_name: str, existing: object
+    ) -> int:
+        if isinstance(existing, types.FunctionType):
+            return (
+                existing.__code__.co_flags
+                & __future__.annotations.compiler_flag
+            )
+        return self._module_future_flags(module_name)
 
     async def plan_lifecycle_changes(self, changes: ChangeSet):
         if self.lifecycle._adapters and not self.lifecycle._activated:
@@ -918,33 +978,20 @@ class NamespaceManager:
                             },
                         )
                     )
-                eager: list[ast.AST] = [
-                    *node.args.defaults,
-                    *(
-                        item
-                        for item in node.args.kw_defaults
-                        if item is not None
-                    ),
-                    *(
-                        argument.annotation
-                        for argument in (
-                            *node.args.posonlyargs,
-                            *node.args.args,
-                            *node.args.kwonlyargs,
-                        )
-                        if argument.annotation is not None
-                    ),
-                ]
-                if node.args.vararg and node.args.vararg.annotation:
-                    eager.append(node.args.vararg.annotation)
-                if node.args.kwarg and node.args.kwarg.annotation:
-                    eager.append(node.args.kwarg.annotation)
-                if node.returns is not None:
-                    eager.append(node.returns)
+                snapshot = snapshots[target]
+                compiler_flags = self._definition_future_flags(
+                    module_name, snapshot.obj
+                )
                 unsafe_expression = next(
                     (
                         expression
-                        for expression in eager
+                        for expression in _function_eager_expressions(
+                            node,
+                            include_annotations=not bool(
+                                compiler_flags
+                                & __future__.annotations.compiler_flag
+                            ),
+                        )
                         if not _staging_expression_is_isolated(
                             expression, staged_namespace
                         )
@@ -968,7 +1015,13 @@ class NamespaceManager:
                             },
                         )
                     )
-                code = compile(tree, f"<dynra-stage:{target}>", "exec")
+                code = compile(
+                    tree,
+                    f"<dynra-stage:{target}>",
+                    "exec",
+                    flags=compiler_flags,
+                    dont_inherit=True,
+                )
                 exec(code, staged_namespace, staged_namespace)  # noqa: S102
                 staged_definitions[target] = staged_namespace[definition]
             projection = {}

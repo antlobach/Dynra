@@ -392,9 +392,11 @@ those changes.
 
 For an accepted function change, Dynra quiesces affected components, compiles
 the definition into an isolated namespace, and exposes the candidate to
-adapters as `ChangeSet.staged_definitions`. Only after every component, binding,
-and gated task replacement prepares and validates does Dynra publish the
-function and managed component/binding generation. This boundary is
+adapters as `ChangeSet.staged_definitions`. Staging preserves the live
+function's postponed-annotation compiler semantics, so resolved and unresolved
+annotations retain their original string form. Only after every component,
+binding, and gated task replacement prepares and validates does Dynra publish
+the function and managed component/binding generation. This boundary is
 failure-atomic, not reader-isolated: ordinary Python global reads and separate
 holder reads can straddle publication. Managed consumers must use one
 `LifecycleRuntime.snapshot()` for related components and bindings.

@@ -982,6 +982,106 @@ def test_definition_time_side_effect_refuses_without_leaking(tmp_path):
     asyncio.run(scenario())
 
 
+def test_staging_preserves_postponed_annotation_semantics(tmp_path):
+    import __future__
+
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("postponed_annotations")
+        initial = (
+            "class Resolved:\n"
+            "    pass\n\n"
+            "def value("
+            "x: Missing['key'], y: Resolved['key']"
+            ") -> Missing:\n"
+            "    return y\n"
+        )
+        exec(  # noqa: S102
+            compile(
+                initial,
+                "<postponed-annotations>",
+                "exec",
+                flags=__future__.annotations.compiler_flag,
+                dont_inherit=True,
+            ),
+            module.__dict__,
+        )
+        original = module.value
+        expected = dict(original.__annotations__)
+        assert expected["x"] == "Missing['key']"
+        assert expected["y"] == "Resolved['key']"
+        assert expected["return"] == "Missing"
+        changes = ChangeSet(
+            ("postponed_annotations.value",),
+            source_after={
+                "postponed_annotations.value": (
+                    "def value("
+                    "x: Missing['key'], y: Resolved['key']"
+                    ") -> Missing:\n"
+                    "    return x\n"
+                )
+            },
+        )
+        plan = await manager.plan_lifecycle_changes(changes)
+        assert plan.safe
+        await manager.reconcile_lifecycle_changes(changes)
+        assert module.value is original
+        assert module.value.__annotations__ == expected
+
+    asyncio.run(scenario())
+
+
+def test_new_definition_ignores_imported_function_future_flags(tmp_path):
+    import __future__
+
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        future_module = manager.create_md("future_provider")
+        exec(  # noqa: S102
+            compile(
+                "def helper(x: Missing):\n    return x\n",
+                "<future-provider>",
+                "exec",
+                flags=__future__.annotations.compiler_flag,
+                dont_inherit=True,
+            ),
+            future_module.__dict__,
+        )
+        module = manager.create_md("normal_annotations")
+        module.helper = future_module.helper
+
+        class Resolved:
+            pass
+
+        module.Resolved = Resolved
+        changes = ChangeSet(
+            ("normal_annotations.value",),
+            source_after={
+                "normal_annotations.value": (
+                    "def value(x: Resolved):\n    return x\n"
+                )
+            },
+        )
+        plan = await manager.plan_lifecycle_changes(changes)
+        assert plan.safe
+        await manager.reconcile_lifecycle_changes(changes)
+        assert module.value.__annotations__ == {"x": Resolved}
+
+    asyncio.run(scenario())
+
+
 def test_class_staging_refuses_without_running_subclass_hooks(tmp_path):
     from IPython.core.interactiveshell import InteractiveShell
 

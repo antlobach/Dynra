@@ -40,6 +40,8 @@ contract TransactionalReconciliation {
     reconcile: (runtime: Runtime, plan: Any) -> Any
     @invariant PrepareBeforeVisibility
         -- One side-effect-free function definition stages outside its live module; every replacement and validation completes before that definition and the managed generation become visible.
+    @invariant PreserveCompilerSemantics
+        -- Staged functions preserve their live module's effective postponed-annotation semantics, including unresolved forward references.
     @invariant SerializedTransactions
         -- Reconciliations serialize per runtime and per shared live framework resource.
     @invariant ManagedGenerationVisibility

@@ -186,11 +186,13 @@ This prevents staging from invoking metaclasses, subclass hooks, or shared-state
 mutations before validation.
 
 For an accepted function, reconciliation quiesces affected components and
-compiles the candidate outside the live module. Adapters must consume it from
-`ChangeSet.staged_definitions`; they must not read the old live global while
-preparing. The function publishes only after all replacements validate.
-Definition and resource rollback share one failure boundary. Missing quiescence
-or compensation is a refusal; never apply the definition separately first.
+compiles the candidate outside the live module. Staging must preserve the live
+function's postponed-annotation compiler flag; resolved and unresolved
+annotations must not change from strings to objects. Adapters must consume the
+candidate from `ChangeSet.staged_definitions`; they must not read the old live
+global while preparing. The function publishes only after all replacements
+validate. Definition and resource rollback share one failure boundary. Missing
+quiescence or compensation is a refusal; never apply the definition separately.
 
 Only the affected component subgraph is rebuilt; dependencies outside it must
 retain identity. Read related components and bindings from one
