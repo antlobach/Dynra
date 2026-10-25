@@ -1,131 +1,211 @@
 ---
 name: dynra
-description: Use Dynra for interactive, REPL-driven Python development. Navigate project modules, execute code in live namespaces, redefine functions and classes, verify behavior immediately, and persist proven changes.
+description: Use Dynra for state-preserving interactive Python development through runtime discovery, structured MCP tools, live definition patches, source healing, explicit bootstrap, lifecycle plans, verification, revert, and persistence.
 ---
 
 # Dynra
 
-Use Dynra to develop Python software interactively inside a running process. Explore namespaces, execute arbitrary Python, evolve definitions, exercise real consumers, and persist the result without restarting between each change.
+Use Dynra to develop Python inside an existing long-running process. Preserve
+loaded data, instances, imports, caches, registrations, and application state
+while inspecting, changing, and verifying behavior. Treat the runtime as a fast
+feedback environment, not as a replacement for source control or durable tests.
 
 ## When to use Dynra
 
-Use Dynra when developing Python software through a live REPL:
+Use Dynra when retained process state has value:
 
-- Navigate an unfamiliar project's module layout without importing every module.
-- Execute arbitrary Python in the namespace that owns the code.
-- Add or redefine functions and classes, then exercise them immediately.
-- Develop through real callers, routes, handlers, registries, and object graphs.
-- Preserve loaded data, instances, caches, and application state while iterating.
-- Inspect live-versus-disk changes and persist definitions after they work.
+- reproduce a state-dependent bug in the process where it occurs;
+- inspect loaded modules, objects, imports, holders, and generations;
+- redefine compatible functions or classes and exercise real consumers;
+- evolve existing instances without rebuilding expensive state;
+- test behavior through routes, callbacks, registries, schedulers, or clients;
+- compare a proven live definition with disk, then persist or revert it;
+- reconcile resources only when an installed adapter supplies lifecycle semantics.
 
-Dynra supports general interactive development, not only debugging. State-dependent bugs, expensive fixtures, stale imported references, and existing instances are cases where preserving the process has additional value.
-
-Use a normal edit-and-run loop when no useful process state exists or the change requires a restart. Native extension state, interpreter startup configuration, incompatible object layouts, and dependency installation usually require a fresh process. Never connect Dynra to untrusted code, agents, or networks.
+Use the ordinary edit/restart loop when no useful state exists, dependencies or
+interpreter configuration changed, native state changed, currently executing or
+suspended frames must change, irreversible external effects occurred, or Dynra
+reports a restart boundary. Never weaken safe patching or ignore a refusal.
 
 ## Preconditions
 
-The target project must run Dynra from its repository root with the project's Python interpreter:
+Dynra is a development dependency in the target project:
 
 ```bash
-cd /path/to/target-project
-/path/to/target-project/.venv/bin/dynra --port 9999
+uv add --dev dynra
+uv run dynra
 ```
 
-The MCP adapter connects to a long-running Dynra process on `127.0.0.1`. Port `9999` is the default. If the project uses another port, pass that port to every `dynra_repl` call. Selecting a port routes the call to an existing runtime; it does not start a new REPL. If `dynra_repl` returns a connection error, start the matching runtime before continuing. Dynra executes arbitrary Python; use it only with trusted local projects and agents.
+The runtime does not start the application. It indexes project modules, listens
+locally, and registers its runtime ID only after the socket is ready. A project
+may configure `[tool.dynra].bootstrap`; call it explicitly only when the task
+needs application-owned live state.
 
-## Tool contract
+The MCP process must run from the target project through its environment:
 
-```text
-dynra_repl(code, module="user", create=False, port=9999)
+```json
+{
+  "mcpServers": {
+    "dynra": {
+      "command": "uv",
+      "args": ["run", "dynra-mcp"]
+    }
+  }
+}
 ```
 
-- `port` selects the long-running Dynra runtime on `127.0.0.1`. It must match the runtime's `dynra --port PORT` option.
-- `module` selects the namespace before executing `code`. Pass the module that owns the definition you inspect or replace.
-- Dynra imports real modules strictly. Import errors are evidence; do not hide them by creating a namespace with the same name.
-- Set `create=True` only for an intentional scratch module.
-- State persists between calls sent to the same port, including imported modules, instances, collections, caches, and prior results.
-- Every response contains `success`. Read `result`, `stdout`, `stderr`, and `error` when present. `source_sync` appears only for live changes, healing, conflicts, or source errors; its absence means the selected module is clean. `result` is a representation of the final expression, not a serialized Python object.
-- Keep each call focused. Prefer a final expression over `print()` wrappers. Do not print `source_sync_status()` after every successful evaluation; Dynra adds `source_sync` when source state is actionable. Query it explicitly only while investigating state.
+## Tool selection
 
-## How to use Dynra
+Prefer structured tools. Use `dynra_evaluate` only for behavior-specific Python.
+`dynra_repl` is a port-based compatibility tool; do not use it when runtime
+selection is available.
 
-1. Discover namespaces without importing them:
+| Need | Tool | Constraint |
+| --- | --- | --- |
+| Discover live projects | `dynra_runtimes()` | Select by runtime ID or unambiguous project path; never scan or guess ports. |
+| Verify target | `dynra_status(runtime)` | Confirm project root, process identity, generation, and source state. |
+| Browse modules | `dynra_modules(runtime)` | Does not require importing every module. |
+| Browse symbols | `dynra_symbols(module, runtime)` | Prefer before import/evaluation. |
+| Read implementation | `dynra_source(target, runtime)` | Target is a qualified top-level function or class. |
+| Start configured app state | `dynra_bootstrap_status`, `dynra_bootstrap` | Explicit only; successful bootstrap is once unless forced. |
+| Explore or patch | `dynra_evaluate(code, module, create, runtime)` | Select the owning module; `create=True` is only for intentional scratch namespaces. |
+| Inspect divergence | `dynra_diff(runtime)` | Review before persistence. |
+| Read audit history | `dynra_events(after, limit, runtime)` | Save the last sequence and request later events by cursor. |
+| Read patch history | `dynra_patch_log(runtime)` | Use when definition state is unclear. |
+| Undo | `dynra_revert(target, runtime)` | Revert failed hypotheses before trying another. |
+| Save | `dynra_persist(target, runtime)` | Persist only a behaviorally verified definition. |
+| Plan resource work | `dynra_lifecycle_plan(definitions, runtime)` | No mutation. Inspect safety, restart flag, affected/preserved components, unmanaged holders, and refusals. |
+| Reconcile resources | `dynra_lifecycle_reconcile(...)` | Call only for a safe plan backed by adapters. |
+| Recover lifecycle state | `dynra_lifecycle_journal(runtime)` | Inspect swap, cleanup, compensation, and recovery state before further mutation. |
 
-   ```text
-   dynra_repl(code="ls_md()")
-   dynra_repl(code="dir_md('package.module')")
-   ```
+Every response has `success`. Read `result`, `stdout`, `stderr`, and `error` when
+present. `source_sync` appears when source state is actionable. A missing
+`source_sync` means no actionable source state for that response; do not issue a
+status call after every clean evaluation.
 
-2. Enter the owning module and inspect the live definition:
+## Fully interactive development loop
 
-   ```text
-   dynra_repl(module="package.module", code="source(target_function)")
-   ```
+1. **Discover and pin the runtime.** Call `dynra_runtimes`, select the target by
+   project, then use its runtime ID for every call. Call `dynra_status` before
+   mutation. Never connect to a similarly numbered port by assumption.
+2. **Discover before importing.** Use `dynra_modules` and `dynra_symbols` to find
+   the owning module. Import failures are evidence; never hide one with a
+   synthetic namespace.
+3. **Bootstrap only if needed.** Use `dynra_bootstrap_status`. Call
+   `dynra_bootstrap` when the task requires the application's initialized object
+   graph. Static inspection and pure function work usually do not need it.
+4. **Read and reproduce.** Use `dynra_source`, then evaluate a focused expression
+   through the real loaded consumer. Record the current event cursor when later
+   attribution matters.
+5. **Patch the owner.** Send the complete top-level function or class definition
+   to its owning module. Patch one logical definition at a time unless several
+   definitions must form one transaction.
+6. **Verify through retained references.** Exercise prior imports, instances,
+   routes, callback registries, clients, or tasks. A direct call to the new
+   definition alone is insufficient when the bug is in integration state.
+7. **Read source state.** Inspect `source_sync` from the response:
+   - `healed`: external top-level definition edits were safely applied;
+   - `live-newer`: the process contains unpersisted live definitions;
+   - `conflict`: both disk and live state changed; stop and resolve explicitly;
+   - `restart-required`: imports, decorators, unsafe constants, or another
+     boundary changed; do not pretend the process matches disk;
+   - `error`: repair the source error before further mutation.
+8. **Plan lifecycle impact when resources are involved.** Call
+   `dynra_lifecycle_plan` before any component reconciliation. Continue only if
+   `safe` is true and `requires_process_restart` is false. Preserve unaffected
+   components. Never suppress unmanaged-holder, missing-operation, task-policy,
+   cycle, or restart-only refusals.
+9. **Reconcile and inspect.** Call `dynra_lifecycle_reconcile` only with the
+   reviewed definition set and source snapshots. On failure, inspect
+   `dynra_lifecycle_journal`: determine whether the old system stayed active,
+   was restored, or manual recovery is required before doing anything else.
+10. **Converge with source.** Use `dynra_diff`. Revert unsuccessful work or
+    persist the exact verified definition. Apply other ordinary source and
+    configuration edits through the coding workflow.
+11. **Run durable checks.** Execute the project's tests/checks and an actual
+    smoke path. Live verification proves the retained process; checks prove the
+    committed deliverable.
 
-3. Exercise the current behavior or build the next increment with focused expressions in the live process.
+## Patch and source rules
 
-4. Replace the complete top-level function or class definition in its owning module:
+- Keep safe function and class patch modes enabled. A refusal protects a live
+  holder, closure layout, sync/async boundary, metaclass, bases, slots, or other
+  invariant.
+- Compatible function patches preserve object identity, including prior imports
+  and direct references. Compatible class patches update the existing class and
+  instances.
+- Use a normal-purpose `__dynra_update__(self)` only when compatible existing
+  instances need initialization after a class change.
+- Existing decorators are not rerun during redefinition or source healing.
+  Verify the framework registry through public behavior.
+- Definition batches roll back definition state on failure. Arbitrary ordinary
+  statements can have irreversible side effects; keep evaluation focused.
+- External top-level function/class edits heal on the next tracked evaluation.
+  Dynra never blindly executes changed imports or arbitrary assignments.
+- A module may opt literal constants into healing with
+  `__dynra_reloadable__ = ("NAME",)`. Undeclared constants retain their live
+  value. Changed imports, decorators, removed declared constants, and declared
+  non-literals report `restart-required`.
+- Use `__dynra_reconcile__(changes)` only to rebuild derived state after healed
+  definitions. Keep it deterministic and idempotent.
+- `persist_source` refuses to overwrite an external conflicting edit. Inspect
+  the diff and choose deliberately; never force around the conflict.
+- Audit events are append-only and deep-copied. A rolled-back transaction keeps
+  its attempted/refused events followed by a `rolled-back` transaction event.
 
-   ```text
-   dynra_repl(
-       module="package.module",
-       code="def target_function(value):\n    return corrected_result(value)",
-   )
-   ```
+## Lifecycle rules
 
-5. Verify through the real consumer, not only through the patched function. Switch modules with the `module` argument instead of calling `in_md()` separately.
+Lifecycle support is optional and development-only. Application modules must
+not import Dynra, use Dynra proxy domain values, or require Dynra decorators.
+Framework semantics belong in optional `dynra.adapters` packages; project-only
+semantics may live under development configuration such as `.dynra/`.
 
-Dynra automatically checks tracked project modules for external source edits before executing the request. Inspect `source_sync`: `healed` means changed top-level functions or classes were applied in place; `conflict` means both disk and the live REPL changed the same definition. Do not ignore conflicts.
+A lifecycle plan is mandatory before mutation. Check:
 
-6. Inspect live-versus-disk changes:
+- exact changed definitions;
+- patched and restarted items;
+- affected and preserved components;
+- unmanaged holders;
+- required process restart;
+- evidence-backed refusals.
 
-   ```text
-   dynra_repl(module="package.module", code="source_patch()")
-   ```
+Adapters prepare and validate replacements before the atomic holder swap. A
+pre-swap failure leaves the old system active. A post-swap failure triggers
+holder rollback and compensation when safe. The journal identifies
+`old-system-active`, `old-system-restored`, `new-system-committed`, or
+`manual-recovery-required`. Do not continue automatically after manual recovery
+is required.
 
-7. Persist a proven definition, or apply the equivalent source edit with the coding agent:
-
-   ```text
-   dynra_repl(
-       module="package.module",
-       code="persist_source('package.module.target_function')",
-   )
-   ```
-
-8. Run the project's durable tests and checks. A successful live evaluation proves behavior only in the current process.
-
-## Patch rules
-
-- Patch one logical definition at a time unless several definitions must change atomically.
-- Keep safe patch modes enabled. Do not switch to `permissive` merely to suppress a refusal.
-- Function patches preserve compatible object identity, including prior imports and direct references.
-- Class patches update compatible existing classes and instances. Add `__dynra_update__(self)` when existing instances need new state.
-- Dynra does not rerun decorators when redefining an existing decorated function or class. Verify any framework registry through its normal public behavior.
-- A failed multi-definition evaluation rolls back definition changes, but arbitrary side effects from ordinary statements cannot be rolled back.
-- Use `revert(live_object)` or `revert('package.module.name')` for one definition; object-form revert follows the changed definition even when a public package re-export rewrites `__module__`. Use `revert_all()` to discard all unpersisted live patches.
-- Use `patch_log()` when the process history or current state is unclear.
-- External edits to top-level functions and classes heal automatically on the next module-scoped call. Dynra does not rerun assignments, imports, or arbitrary top-level side effects.
-- Use a module-level `__dynra_reconcile__(changes)` hook only when the application must rebuild derived state after healed definitions.
-
-## Namespace commands
-
-| Command | Use |
-| --- | --- |
-| `ls_md()` | List discovered project modules and loaded namespaces. |
-| `dir_md(name)` | Inspect public names without importing an unloaded project module. |
-| `require_md(name)` | Import a real module and preserve its import error. |
-| `create_md(name)` | Create an explicit synthetic scratch namespace. |
-| `source(obj)` / `doc(obj)` | Inspect a live object. |
-| `find_var(pattern)` | Search loaded modules for symbol names. |
-| `diverged()` / `source_patch()` | Compare live definitions with source files. |
-| `persist_source(target=None)` | Write exact evaluated definitions to source. |
-| `source_sync_status(module=None)` | Inspect module generation, healed state, conflicts, and live-only definitions. |
-| `patch_log()` | Inspect applied, refused, reverted, and persisted operations. |
-| `revert(target)` / `revert_all()` | Undo live definition changes by object or qualified name. |
+Task replacement follows an explicit policy: `never`, `safe-point`, `immediate`,
+`drain`, `rolling`, or `manual`. Do not restart a task under a different policy
+because it is convenient. Currently executing and suspended frames are not
+rewritten.
 
 ## Failure handling
 
-- **Import failure:** fix the environment, dependency, or module error. Do not use `create=True` as a fallback.
-- **Patch refusal:** inspect holders and compatibility constraints. Prefer a compatible definition or restart when the change requires a new closure layout, sync/async boundary, metaclass, base class, or slots layout.
-- **Unexpected behavior after a patch:** inspect `patch_log()` and `source_patch()`, then revert before testing a different hypothesis.
-- **Source conflict:** keep working state intact, inspect `source_sync` and `source_patch()`, then explicitly choose the disk or live definition. `persist_source()` will not overwrite the external edit.
+- **No runtime:** ask the developer to start `uv run dynra` in the target project;
+  the MCP adapter does not start it.
+- **Ambiguous runtime:** use the exact runtime ID returned by `dynra_runtimes`.
+- **Import failure:** fix the environment, dependency, or module. Do not use
+  `create=True` as fallback.
+- **Patch refusal:** inspect holders and compatibility evidence. Make a
+  compatible change, install/configure an adapter, or restart.
+- **Unexpected behavior:** inspect incremental events, patch log, and diff; then
+  revert before testing a different hypothesis.
+- **Source conflict:** stop mutation, inspect live and disk definitions, then
+  explicitly choose one. Persistence will not overwrite disk.
+- **Restart required:** preserve evidence and restart. Do not claim convergence.
+- **Lifecycle failure:** read the journal and recovery state. If manual recovery
+  is required, stop automated mutation and report the exact incomplete cleanup
+  or compensation.
+
+## Completion criteria
+
+A Dynra-assisted change is complete only when:
+
+1. behavior was reproduced before the change where practical;
+2. the patch was exercised through the real consumer;
+3. source state has no unresolved conflict or restart-required divergence;
+4. affected lifecycle work committed safely or was not needed;
+5. the verified definition is represented in source;
+6. durable tests/checks and a relevant smoke path pass.

@@ -142,6 +142,9 @@ dynra_patch_log(runtime="", port=9999)
 dynra_events(after=0, limit=None, runtime="", port=9999)
 dynra_bootstrap(force=False, runtime="", port=9999)
 dynra_bootstrap_status(runtime="", port=9999)
+dynra_lifecycle_plan(definitions, runtime="", port=9999)
+dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtime="", port=9999)
+dynra_lifecycle_journal(runtime="", port=9999)
 ```
 
 `runtime` accepts a runtime ID, unambiguous project path, or registered port.
@@ -150,45 +153,78 @@ The compatibility tool
 It selects an existing runtime by port and does not start a process. Imports are
 strict, and `create=True` is only for intentional synthetic namespaces.
 
-### Agent workflow
+### Fully interactive agent workflow
 
-1. Discover the project's modules without importing them.
-2. Enter a module and inspect its live namespace.
-3. Execute focused expressions to explore behavior or build the next increment.
-4. Add or redefine a complete function or class in its owning module.
-5. Exercise the change through a real consumer while process state remains alive.
-6. Inspect the live-versus-disk diff.
-7. Persist the definition or apply the equivalent source edit, then run the project's durable checks.
+Use the structured tools by default. They return machine-readable values and
+avoid spending evaluations on command plumbing. Use `dynra_evaluate` for
+arbitrary expressions and complete definition replacements; keep `dynra_repl`
+only for clients that have not migrated to runtime discovery.
+
+| Need | Tool | Rule |
+| --- | --- | --- |
+| Find a running project | `dynra_runtimes` | Select by runtime ID or unambiguous project path; never guess or scan ports. |
+| Check identity and freshness | `dynra_status` | Confirm project root and inspect generation/source state before mutation. |
+| Browse without importing | `dynra_modules`, `dynra_symbols` | Discover first; imports can start application code or side effects. |
+| Inspect implementation | `dynra_source` | Use a qualified top-level function or class. |
+| Start project-owned live state | `dynra_bootstrap_status`, then `dynra_bootstrap` | Bootstrap only when the task needs application state; Dynra never does this automatically. |
+| Explore or patch | `dynra_evaluate` | Select the owning module and send focused expressions or complete top-level definitions. |
+| Review live changes | `dynra_diff`, `dynra_events`, `dynra_patch_log` | Use events with a saved sequence cursor for incremental observation. |
+| Undo or save | `dynra_revert`, `dynra_persist` | Revert failed hypotheses; persist only behavior verified through a real consumer. |
+| Change managed resources | `dynra_lifecycle_plan` before `dynra_lifecycle_reconcile` | Reconcile only a safe plan. A refusal means restart or install/configure an adapter. |
+| Diagnose interrupted lifecycle work | `dynra_lifecycle_journal` | Read swap, compensation, cleanup, and recovery state before another mutation. |
+
+Recommended loop:
+
+1. Call `dynra_runtimes`, choose the target, and pin its runtime ID for every
+   subsequent call.
+2. Call `dynra_status`, `dynra_modules`, and `dynra_symbols` to establish the
+   runtime and owning module without speculative imports.
+3. If live application resources are required, inspect
+   `dynra_bootstrap_status`; call `dynra_bootstrap` once. Do not bootstrap for
+   static inspection or pure definition work.
+4. Read the current implementation with `dynra_source`, then reproduce the
+   behavior through the real loaded caller with `dynra_evaluate`.
+5. Replace one complete top-level function or class in its owning module.
+   Keep safe patch modes enabled. For multiple definitions, send one request
+   only when they form a required atomic unit.
+6. Exercise the changed behavior through existing instances, imports,
+   registries, routes, or callbacks—not only by directly calling the new
+   definition.
+7. Inspect `source_sync` on every response. Stop on `conflict`, `error`, or
+   `restart-required`. Use `dynra_events(after=CURSOR)` to observe only work
+   performed since the last checkpoint.
+8. If managed components or tasks are affected, request
+   `dynra_lifecycle_plan`. Reconcile only when `safe` is true and
+   `requires_process_restart` is false. Never suppress unmanaged-holder or
+   missing-lifecycle refusals.
+9. Review `dynra_diff`. Revert an unsuccessful idea or persist the exact proven
+   definition. Then apply any remaining ordinary source/configuration edits.
+10. Run the project's durable checks. Live success proves the current process;
+    source control and tests prove the deliverable.
 
 Example:
 
 ```text
-dynra_repl(code="ls_md()")
-dynra_repl(code="dir_md('shop.pricing')")
-
-dynra_repl(
-  module="shop.pricing",
-  code="source(calculate_total)",
-)
-
-dynra_repl(
+dynra_runtimes()
+dynra_status(runtime="RUNTIME_ID")
+dynra_symbols(module="shop.pricing", runtime="RUNTIME_ID")
+dynra_source(target="shop.pricing.calculate_total", runtime="RUNTIME_ID")
+dynra_evaluate(
   module="shop.pricing",
   code="def calculate_total(cart):\n    return sum(item.price * item.quantity for item in cart)",
+  runtime="RUNTIME_ID",
 )
-
-dynra_repl(
+dynra_evaluate(
   module="shop.checkout",
   code="active_checkout.total()",
-  port=9999,
+  runtime="RUNTIME_ID",
 )
-
-dynra_repl(
-  module="shop.pricing",
-  code="source_patch()",
-)
+dynra_diff(runtime="RUNTIME_ID")
+dynra_persist(target="shop.pricing.calculate_total", runtime="RUNTIME_ID")
 ```
 
-A successful live patch proves the behavior in the current process. It does not replace source control or the project's test suite.
+A successful live patch proves behavior in that process. It does not replace
+source control or the project's test suite.
 
 ## Namespace model
 
