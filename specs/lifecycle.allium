@@ -1,9 +1,10 @@
 -- allium: 3
 -- Scope: optional development-time lifecycle reconciliation for Dynra runtimes
--- Includes: planning, adapters, holders, bindings, tasks, atomic replacement,
--- durable recovery, project-local adapters, and framework adapters
+-- Includes: planning, adapters, holders, bindings, tasks, failure-atomic
+-- replacement, durable recovery, project-local adapters, and framework adapters
 -- Excludes: production coupling, security, native-state migration,
--- executing-frame replacement, irreversible external effects
+-- executing-frame replacement, irreversible external effects, ordinary-reader
+-- isolation across Python globals, multi-definition live publication
 
 actor Developer {
     identified_by: this
@@ -20,7 +21,7 @@ contract DeterministicImpactPlanning {
     @invariant HolderEvidence
         -- Every known holder is managed or reported as an exact unmanaged refusal.
     @invariant UnsafePlansRefuse
-        -- Missing semantics, cycles, unmanaged holders, decorated definitions, restart-only bindings, and disallowed task policies refuse before publication.
+        -- Missing semantics, cycles, unmanaged holders, decorated or class definitions, eager definition-time effects, multi-definition publication, restart-only bindings, and disallowed task policies refuse before publication.
 }
 
 contract FailureAtomicAdapterActivation {
@@ -38,11 +39,13 @@ contract FailureAtomicAdapterActivation {
 contract TransactionalReconciliation {
     reconcile: (runtime: Runtime, plan: Any) -> Any
     @invariant PrepareBeforeVisibility
-        -- Definitions stage outside live modules; every replacement and validation completes before staged definitions and the managed generation become visible.
+        -- One side-effect-free function definition stages outside its live module; every replacement and validation completes before that definition and the managed generation become visible.
     @invariant SerializedTransactions
         -- Reconciliations serialize per runtime and per shared live framework resource.
-    @invariant AtomicGenerationVisibility
-        -- Readers observe one complete old or new managed generation, never a mixed set.
+    @invariant ManagedGenerationVisibility
+        -- Snapshot readers observe one complete old or new managed generation, never a mixed managed set.
+    @invariant ExplicitPythonReaderBoundary
+        -- Ordinary Python global and holder reads are not isolated as one snapshot; multi-definition live publication and class construction refuse.
     @invariant PreSwapRecovery
         -- Failure resumes every old component and disposes every prepared replacement in reverse dependency order.
     @invariant PostSwapCompensation

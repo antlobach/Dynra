@@ -12,25 +12,94 @@ import re
 import sys
 import types
 from collections.abc import Mapping
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from typing import Any, cast
 
-from .project import ProjectLayout
 from .lifecycle import (
     ChangeSet,
     LifecycleRuntime,
     ReconciliationRefused,
     discover_adapters,
 )
+from .project import ProjectLayout
 from .registry import registry_directory
 
 #: CPython flag marking a code object as a coroutine.
 CO_COROUTINE = 0x0080
 
 
+def _staging_expression_is_isolated(
+    expression: ast.AST, namespace: Mapping[str, object]
+) -> bool:
+    """Whether evaluating an eager definition expression cannot call user code."""
+    if isinstance(expression, (ast.Constant, ast.Name)):
+        return True
+    if isinstance(expression, (ast.Tuple, ast.List)):
+        return all(
+            _staging_expression_is_isolated(item, namespace)
+            for item in expression.elts
+        )
+    if isinstance(expression, ast.Dict):
+        for key in expression.keys:
+            if key is None:
+                return False
+            try:
+                ast.literal_eval(key)
+            except (ValueError, TypeError):
+                return False
+        return all(
+            _staging_expression_is_isolated(value, namespace)
+            for value in expression.values
+        )
+    if isinstance(expression, ast.Attribute) and isinstance(
+        expression.value, ast.Name
+    ):
+        owner = namespace.get(expression.value.id)
+        return (
+            type(owner) is types.ModuleType
+            and expression.attr in owner.__dict__
+        )
+    try:
+        ast.literal_eval(expression)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _function_eager_expressions(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[ast.AST, ...]:
+    expressions: list[ast.AST] = [
+        *node.args.defaults,
+        *(item for item in node.args.kw_defaults if item is not None),
+        *(
+            argument.annotation
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+            if argument.annotation is not None
+        ),
+    ]
+    if node.args.vararg and node.args.vararg.annotation:
+        expressions.append(node.args.vararg.annotation)
+    if node.args.kwarg and node.args.kwarg.annotation:
+        expressions.append(node.args.kwarg.annotation)
+    if node.returns is not None:
+        expressions.append(node.returns)
+    return tuple(expressions)
+
+
+def _make_cell(value: object) -> types.CellType:
+    closure = (lambda: value).__closure__
+    assert closure is not None
+    return closure[0]
+
+
 def get_block_at_line(source, line_number):
-    """Find the outermost AST node (def/class) containing the given line number."""
+    """Find the outermost definition containing the given line number."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -38,26 +107,30 @@ def get_block_at_line(source, line_number):
 
     target_node = None
     for node in ast.walk(tree):
-        # We look for top-level definitions
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            # lineno is 1-based
-            if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
-                if node.lineno <= line_number <= node.end_lineno:
-                    # If we haven't found a node yet, or this node is 'larger' (outer) than the current one
-                    if target_node is None:
-                        target_node = node
-                    else:
-                        # Prefer the outer definition when nested definitions overlap.
-                        if (
-                            node.lineno < target_node.lineno
-                            or node.end_lineno > target_node.end_lineno
-                        ):
-                            target_node = node
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        end_lineno = node.end_lineno
+        if end_lineno is None or not node.lineno <= line_number <= end_lineno:
+            continue
+        if target_node is None:
+            target_node = node
+            continue
+        target_end = target_node.end_lineno
+        if (
+            target_end is None
+            or node.lineno < target_node.lineno
+            or end_lineno > target_end
+        ):
+            target_node = node
 
-    if target_node:
-        lines = source.splitlines()
-        return "\n".join(lines[target_node.lineno - 1 : target_node.end_lineno])
-    return None
+    if target_node is None or target_node.end_lineno is None:
+        return None
+    lines = source.splitlines()
+    return "\n".join(
+        lines[target_node.lineno - 1 : target_node.end_lineno]
+    )
 
 
 def analyze_function_patch_compatibility(old_func, new_func):
@@ -132,14 +205,11 @@ def patch_function(old_func, new_func, safe_mode=True):
 
 def _module_dict_ids():
     """Identity of every live module namespace, so referrer scans can skip them."""
-    ids = set()
-    for mod in list(sys.modules.values()):
-        if isinstance(mod, types.ModuleType):
-            try:
-                ids.add(id(mod.__dict__))
-            except Exception:
-                pass
-    return ids
+    return {
+        id(module.__dict__)
+        for module in list(sys.modules.values())
+        if isinstance(module, types.ModuleType)
+    }
 
 
 def _module_bindings(obj):
@@ -246,7 +316,7 @@ def patch_class(old_cls, new_cls, safe_mode=True):
             if isinstance(obj, old_cls):
                 try:
                     obj.__dynra_update__()
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     print(f"Error updating instance {obj}: {e}")
     return True
 
@@ -286,7 +356,7 @@ def _definition_with_globals(value, namespace):
                 _function_with_globals(attribute.__func__, namespace)
             )
         elif isinstance(attribute, property):
-            accessors = (
+            rebound_accessors = tuple(
                 _function_with_globals(accessor, namespace)
                 if isinstance(accessor, types.FunctionType)
                 else accessor
@@ -296,7 +366,12 @@ def _definition_with_globals(value, namespace):
                     attribute.fdel,
                 )
             )
-            replacement = property(*accessors, doc=attribute.__doc__)
+            replacement = property(
+                cast(Any, rebound_accessors[0]),
+                cast(Any, rebound_accessors[1]),
+                cast(Any, rebound_accessors[2]),
+                doc=attribute.__doc__,
+            )
         if replacement is not None:
             setattr(value, name, replacement)
     return value
@@ -474,8 +549,7 @@ class NamespaceManager:
         if function_code is None:
             return None
         closure = tuple(
-            (lambda value: lambda: value)(None).__closure__[0]
-            for _ in function_code.co_freevars
+            _make_cell(None) for _ in function_code.co_freevars
         )
         return types.FunctionType(
             function_code,
@@ -511,14 +585,22 @@ class NamespaceManager:
                 if isinstance(statement, ast.AnnAssign)
                 else ()
             )
-            if any(
+            if not any(
                 isinstance(target, ast.Name) and target.id == "__slots__"
                 for target in targets
             ):
-                try:
-                    declared_slots = ast.literal_eval(statement.value)
-                except (ValueError, TypeError):
-                    return True
+                continue
+            value = (
+                statement.value
+                if isinstance(statement, (ast.Assign, ast.AnnAssign))
+                else None
+            )
+            if value is None:
+                return True
+            try:
+                declared_slots = ast.literal_eval(value)
+            except (ValueError, TypeError):
+                return True
         if declared_slots != getattr(current, "__slots__", None):
             return True
         declared_metaclass = next(
@@ -585,11 +667,140 @@ class NamespaceManager:
                 unmanaged=holders - repairable,
             )
 
+    def _definition_staging_refusals(
+        self, changes: ChangeSet
+    ) -> tuple[Mapping[str, object], ...]:
+        targets = tuple(
+            target
+            for target in changes.definitions
+            if target in changes.source_after
+        )
+        if len(targets) > 1:
+            return (
+                {
+                    "definitions": targets,
+                    "reason": (
+                        "ordinary Python readers cannot atomically observe "
+                        "multiple live definition publications"
+                    ),
+                    "suggested_action": (
+                        "reconcile one live definition at a time"
+                    ),
+                },
+            )
+        refusals: list[Mapping[str, object]] = []
+        for target in targets:
+            source = changes.source_after[target]
+            if not source:
+                continue
+            module_name, definition = self._resolve_target(target)
+            try:
+                tree = ast.parse(source)
+            except SyntaxError as error:
+                refusals.append(
+                    {
+                        "definition": target,
+                        "reason": f"staged source is invalid: {error.msg}",
+                        "suggested_action": "repair the definition source",
+                    }
+                )
+                continue
+            node = next(
+                (
+                    item
+                    for item in tree.body
+                    if isinstance(
+                        item,
+                        (
+                            ast.FunctionDef,
+                            ast.AsyncFunctionDef,
+                            ast.ClassDef,
+                        ),
+                    )
+                    and item.name == definition
+                ),
+                None,
+            )
+            if node is None or len(tree.body) != 1:
+                refusals.append(
+                    {
+                        "definition": target,
+                        "reason": (
+                            "staged source must contain exactly the target "
+                            "definition"
+                        ),
+                        "suggested_action": (
+                            "submit one side-effect-free definition"
+                        ),
+                    }
+                )
+            elif node.decorator_list:
+                refusals.append(
+                    {
+                        "definition": target,
+                        "reason": (
+                            "decorated definitions cannot be transactionally "
+                            "staged"
+                        ),
+                        "suggested_action": (
+                            "restart or expose undecorated adapter composition"
+                        ),
+                    }
+                )
+            elif isinstance(node, ast.ClassDef):
+                refusals.append(
+                    {
+                        "definition": target,
+                        "reason": (
+                            "class construction can invoke metaclasses or "
+                            "subclass hooks during staging"
+                        ),
+                        "suggested_action": "restart after class changes",
+                    }
+                )
+            else:
+                namespace = sys.modules[module_name].__dict__
+                unsafe = next(
+                    (
+                        expression
+                        for expression in _function_eager_expressions(node)
+                        if not _staging_expression_is_isolated(
+                            expression, namespace
+                        )
+                    ),
+                    None,
+                )
+                if unsafe is not None:
+                    refusals.append(
+                        {
+                            "definition": target,
+                            "reason": (
+                                "definition-time expression may execute user "
+                                "code during staging"
+                            ),
+                            "expression": ast.unparse(unsafe),
+                            "suggested_action": (
+                                "move side effects behind the function body "
+                                "or restart"
+                            ),
+                        }
+                    )
+        return tuple(refusals)
+
     async def plan_lifecycle_changes(self, changes: ChangeSet):
         if self.lifecycle._adapters and not self.lifecycle._activated:
             await self.lifecycle.activate_adapters()
         self._track_lifecycle_holders(changes)
-        return self.lifecycle.impact_plan(changes)
+        plan = self.lifecycle.impact_plan(changes)
+        refusals = self._definition_staging_refusals(changes)
+        if not refusals:
+            return plan
+        return replace(
+            plan,
+            safe=False,
+            patched=(),
+            refusals=(*plan.refusals, *refusals),
+        )
 
     async def reconcile_lifecycle_changes(
         self, changes: ChangeSet, *, approved: bool = False
@@ -600,13 +811,16 @@ class NamespaceManager:
             for target in changes.definitions
             if target in changes.source_after
         )
+        refusals = self._definition_staging_refusals(changes)
+        if refusals:
+            raise ReconciliationRefused(refusals)
         deleted = object()
         staged_definitions: dict[str, object] = {}
         publication_definitions: dict[str, object] = {}
         snapshots: dict[str, DefinitionSnapshot] = {}
         undo_lengths: dict[tuple[str, str], int] = {}
-        live_sources: dict[tuple[str, str], str] = {}
-        source_bases: dict[tuple[str, str], str] = {}
+        live_sources: dict[tuple[str, str], str | None] = {}
+        source_bases: dict[tuple[str, str], str | None] = {}
         module_generations: dict[str, int] = {}
         original_module: list[str | None] = [None]
 
@@ -632,174 +846,18 @@ class NamespaceManager:
             original_module[0] = self.current_name
 
         def stage_definitions():
-            parsed_sources = {
-                target: ast.parse(changes.source_after[target])
-                for target in targets
-                if changes.source_after[target]
-            }
-            target_names = {
-                (
-                    self._resolve_target(target)[0],
-                    self._resolve_target(target)[1],
-                ): target
-                for target in targets
-            }
-            dependencies: dict[str, set[str]] = {
-                target: set() for target in targets
-            }
-            def eager_expressions(node):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    expressions = [
-                        *node.decorator_list,
-                        *node.args.defaults,
-                        *(
-                            item
-                            for item in node.args.kw_defaults
-                            if item is not None
-                        ),
-                        *(
-                            argument.annotation
-                            for argument in (
-                                *node.args.posonlyargs,
-                                *node.args.args,
-                                *node.args.kwonlyargs,
-                            )
-                            if argument.annotation is not None
-                        ),
-                    ]
-                    if node.args.vararg and node.args.vararg.annotation:
-                        expressions.append(node.args.vararg.annotation)
-                    if node.args.kwarg and node.args.kwarg.annotation:
-                        expressions.append(node.args.kwarg.annotation)
-                    if node.returns is not None:
-                        expressions.append(node.returns)
-                    return expressions
-                if isinstance(node, ast.ClassDef):
-                    expressions = [
-                        *node.decorator_list,
-                        *node.bases,
-                        *(keyword.value for keyword in node.keywords),
-                    ]
-                    for statement in node.body:
-                        if isinstance(
-                            statement,
-                            (
-                                ast.FunctionDef,
-                                ast.AsyncFunctionDef,
-                                ast.ClassDef,
-                            ),
-                        ):
-                            expressions.extend(eager_expressions(statement))
-                        else:
-                            expressions.append(statement)
-                    return expressions
-                return []
-
-            for target, tree in parsed_sources.items():
-                module_name, definition = self._resolve_target(target)
-                node = next(
-                    (
-                        item
-                        for item in tree.body
-                        if isinstance(
-                            item,
-                            (
-                                ast.FunctionDef,
-                                ast.AsyncFunctionDef,
-                                ast.ClassDef,
-                            ),
-                        )
-                        and item.name == definition
-                    ),
-                    None,
-                )
-                eager = eager_expressions(node)
-                for expression in eager:
-                    for item in ast.walk(expression):
-                        if isinstance(item, ast.Name) and isinstance(
-                            item.ctx, ast.Load
-                        ):
-                            dependency = target_names.get(
-                                (module_name, item.id)
-                            )
-                            if dependency is not None and dependency != target:
-                                dependencies[target].add(dependency)
-                        elif (
-                            isinstance(item, ast.Attribute)
-                            and isinstance(item.ctx, ast.Load)
-                            and isinstance(item.value, ast.Name)
-                        ):
-                            referenced = sys.modules[module_name].__dict__.get(
-                                item.value.id
-                            )
-                            if isinstance(referenced, types.ModuleType):
-                                dependency = target_names.get(
-                                    (referenced.__name__, item.attr)
-                                )
-                                if (
-                                    dependency is not None
-                                    and dependency != target
-                                ):
-                                    dependencies[target].add(dependency)
-
-            ordered_targets = []
-            visiting = set()
-            visited = set()
-
-            def visit(target):
-                if target in visited:
-                    return
-                if target in visiting:
-                    raise ReconciliationRefused(
-                        (
-                            {
-                                "definition": target,
-                                "reason": (
-                                    "staged definitions have an eager "
-                                    "dependency cycle"
-                                ),
-                            },
-                        )
-                    )
-                visiting.add(target)
-                for dependency in dependencies[target]:
-                    visit(dependency)
-                visiting.remove(target)
-                visited.add(target)
-                ordered_targets.append(target)
-
+            refusals = self._definition_staging_refusals(changes)
+            if refusals:
+                raise ReconciliationRefused(refusals)
             for target in targets:
-                visit(target)
-            staged_namespaces: dict[str, dict] = {}
-            staged_modules: dict[str, types.ModuleType] = {}
-            for target in ordered_targets:
                 module_name, definition = self._resolve_target(target)
                 source = changes.source_after[target]
                 if not source:
                     staged_definitions[target] = deleted
                     continue
                 namespace = sys.modules[module_name].__dict__
-                staged_namespace = staged_namespaces.setdefault(
-                    module_name, dict(namespace)
-                )
-                for name, value in tuple(staged_namespace.items()):
-                    if not isinstance(value, types.ModuleType):
-                        continue
-                    if not any(
-                        target_module == value.__name__
-                        for target_module, _ in target_names
-                    ):
-                        continue
-                    staged_module = staged_modules.get(value.__name__)
-                    if staged_module is None:
-                        staged_module = types.ModuleType(value.__name__)
-                        staged_modules[value.__name__] = staged_module
-                    staged_module.__dict__.update(value.__dict__)
-                    staged_module.__dict__.update(
-                        staged_namespaces.get(value.__name__, {})
-                    )
-                    staged_namespace[name] = staged_module
-                tree = parsed_sources[target]
+                staged_namespace = dict(namespace)
+                tree = ast.parse(source)
                 node = next(
                     (
                         item
@@ -816,7 +874,22 @@ class NamespaceManager:
                     ),
                     None,
                 )
-                if node is not None and node.decorator_list:
+                if node is None or len(tree.body) != 1:
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "definition": target,
+                                "reason": (
+                                    "staged source must contain exactly the "
+                                    "target definition"
+                                ),
+                                "suggested_action": (
+                                    "submit one side-effect-free definition"
+                                ),
+                            },
+                        )
+                    )
+                if node.decorator_list:
                     raise ReconciliationRefused(
                         (
                             {
@@ -832,23 +905,72 @@ class NamespaceManager:
                             },
                         )
                     )
-                code = compile(tree, f"<dynra-stage:{target}>", "exec")
-                exec(code, staged_namespace, staged_namespace)  # noqa: S102
-                if definition not in staged_namespace:
+                if isinstance(node, ast.ClassDef):
                     raise ReconciliationRefused(
                         (
                             {
                                 "definition": target,
                                 "reason": (
-                                    "staged source did not define the target"
+                                    "class construction can invoke metaclasses "
+                                    "or subclass hooks during staging"
+                                ),
+                                "suggested_action": "restart after class changes",
+                            },
+                        )
+                    )
+                eager: list[ast.AST] = [
+                    *node.args.defaults,
+                    *(
+                        item
+                        for item in node.args.kw_defaults
+                        if item is not None
+                    ),
+                    *(
+                        argument.annotation
+                        for argument in (
+                            *node.args.posonlyargs,
+                            *node.args.args,
+                            *node.args.kwonlyargs,
+                        )
+                        if argument.annotation is not None
+                    ),
+                ]
+                if node.args.vararg and node.args.vararg.annotation:
+                    eager.append(node.args.vararg.annotation)
+                if node.args.kwarg and node.args.kwarg.annotation:
+                    eager.append(node.args.kwarg.annotation)
+                if node.returns is not None:
+                    eager.append(node.returns)
+                unsafe_expression = next(
+                    (
+                        expression
+                        for expression in eager
+                        if not _staging_expression_is_isolated(
+                            expression, staged_namespace
+                        )
+                    ),
+                    None,
+                )
+                if unsafe_expression is not None:
+                    raise ReconciliationRefused(
+                        (
+                            {
+                                "definition": target,
+                                "reason": (
+                                    "definition-time expression may execute "
+                                    "user code during staging"
+                                ),
+                                "expression": ast.unparse(unsafe_expression),
+                                "suggested_action": (
+                                    "move side effects behind the function body "
+                                    "or restart"
                                 ),
                             },
                         )
                     )
+                code = compile(tree, f"<dynra-stage:{target}>", "exec")
+                exec(code, staged_namespace, staged_namespace)  # noqa: S102
                 staged_definitions[target] = staged_namespace[definition]
-                staged_module = staged_modules.get(module_name)
-                if staged_module is not None:
-                    staged_module.__dict__.update(staged_namespace)
             projection = {}
             for target in targets:
                 candidate = staged_definitions.get(target)
@@ -1037,9 +1159,12 @@ class NamespaceManager:
         if name in self.project.modules:
             raise ValueError(f"{name!r} is a project module; use require_md({name!r})")
         existing = sys.modules.get(name)
-        if existing is not None and name not in self.synthetic_modules:
-            if getattr(existing, "__file__", None) != f"<repl:{name}>":
-                raise ValueError(f"{name!r} is already a real loaded module")
+        if (
+            existing is not None
+            and name not in self.synthetic_modules
+            and getattr(existing, "__file__", None) != f"<repl:{name}>"
+        ):
+            raise ValueError(f"{name!r} is already a real loaded module")
         if name not in sys.modules:
             mod = types.ModuleType(name)
             mod.__file__ = f"<repl:{name}>"
@@ -1455,7 +1580,7 @@ class NamespaceManager:
             if callable(hook):
                 try:
                     hook(tuple(copy.deepcopy(change) for change in changes))
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001
                     changes.append(
                         {
                             "definition": f"{module_name}.__dynra_reconcile__",
@@ -1632,7 +1757,7 @@ class NamespaceManager:
     def source(self, obj):
         try:
             print(inspect.getsource(obj))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             print(f"Could not get source: {error}")
 
     def dir_md(self, module=None):
@@ -2057,15 +2182,20 @@ class NamespaceManager:
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         }
+        def previous_source(qualified: str) -> str:
+            source_module, source_name = qualified.rsplit(".", 1)
+            return self._live_sources.get(
+                (source_module, source_name),
+                self._disk_definition(source_module, source_name)[0] or "",
+            ) or ""
+
         lifecycle_plan_result = None
+        lifecycle_changes = None
         if definition_sources and not self._lifecycle_reconciling:
             lifecycle_changes = ChangeSet(
                 tuple(sorted(definition_sources)),
                 {
-                    name: self._live_sources.get(
-                        tuple(name.rsplit(".", 1)),
-                        self._disk_definition(*name.rsplit(".", 1))[0] or "",
-                    )
+                    name: previous_source(name)
                     for name in definition_sources
                 },
                 definition_sources,
@@ -2176,7 +2306,7 @@ class NamespaceManager:
                 )
                 refusal_plan = (
                     self.lifecycle.impact_plan(lifecycle_changes).as_dict()
-                    if definition_sources
+                    if lifecycle_changes is not None
                     else None
                 )
                 self.last_lifecycle_plan = refusal_plan
@@ -2310,18 +2440,22 @@ class NamespaceManager:
         text = info.path.read_text(encoding="utf-8")
         tree = ast.parse(text)
         for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                if node.name == name:
-                    start = (
-                        node.decorator_list[0].lineno
-                        if node.decorator_list
-                        else node.lineno
-                    )
-                    return (
-                        self._statement_source(text, node),
-                        info.path,
-                        (start, node.end_lineno),
-                    )
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ) and node.name == name:
+                end = node.end_lineno
+                if end is None:
+                    continue
+                start = (
+                    node.decorator_list[0].lineno
+                    if node.decorator_list
+                    else node.lineno
+                )
+                return (
+                    self._statement_source(text, node),
+                    info.path,
+                    (start, end),
+                )
         return None, info.path, None
 
     @staticmethod
@@ -2384,9 +2518,14 @@ class NamespaceManager:
         persisted = []
         for path, file_changes in by_path.items():
             lines = path.read_text(encoding="utf-8").splitlines()
+            append_position = len(lines) + 1
             ordered = sorted(
                 file_changes,
-                key=lambda change: change[1][0] if change[1] else len(lines) + 1,
+                key=lambda change, append_position=append_position: (
+                    change[1][0]
+                    if change[1] is not None
+                    else append_position
+                ),
                 reverse=True,
             )
             for _, span, source_text, module, name in ordered:

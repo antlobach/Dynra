@@ -142,7 +142,7 @@ dynra_patch_log(runtime="", port=9999)
 dynra_events(after=0, limit=None, runtime="", port=9999)
 dynra_bootstrap(force=False, runtime="", port=9999)
 dynra_bootstrap_status(runtime="", port=9999)
-dynra_lifecycle_plan(definitions, runtime="", port=9999)
+dynra_lifecycle_plan(definitions, source_before={}, source_after={}, runtime="", port=9999)
 dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtime="", port=9999)
 dynra_lifecycle_journal(runtime="", port=9999)
 ```
@@ -185,8 +185,8 @@ Recommended loop:
 4. Read the current implementation with `dynra_source`, then reproduce the
    behavior through the real loaded caller with `dynra_evaluate`.
 5. Replace one complete top-level function or class in its owning module.
-   Keep safe patch modes enabled. For multiple definitions, send one request
-   only when they form a required atomic unit.
+   Keep safe patch modes enabled and submit one definition at a time; ordinary
+   Python readers cannot observe a multi-definition publication atomically.
 6. Exercise the changed behavior through existing instances, imports,
    registries, routes, or callbacks—not only by directly calling the new
    definition.
@@ -267,9 +267,12 @@ Remote code executes one top-level statement at a time. After each function or c
 - Safe function mode refuses incompatible closure layouts and sync/async changes when old objects still have direct holders.
 - Safe class mode refuses incompatible metaclass, base-class, and `__slots__` changes.
 - Existing decorated definitions retain their registration because Dynra does not rerun their decorators.
-- A multi-definition request restores changed definitions if a definition is refused or evaluation fails.
+- Multi-definition evaluation can roll back failures, but it does not isolate
+  concurrent ordinary Python readers between sequential publications.
 
-Transactions cover definition changes. They cannot undo arbitrary external side effects from ordinary statements or a first-time decorator. Native extension state, process configuration, and incompatible object layouts can still require a restart.
+Transactions cover definition changes, not arbitrary external side effects from
+ordinary statements, first-time decorators, native extensions, or process
+configuration. Incompatible object layouts can still require a restart.
 
 ### Evolving existing instances
 
@@ -374,22 +377,33 @@ Agents can inspect and operate lifecycle reconciliation without evaluating
 arbitrary helper code:
 
 ```text
-dynra_lifecycle_plan(definitions, runtime="", port=9999)
+dynra_lifecycle_plan(definitions, source_before={}, source_after={}, runtime="", port=9999)
 dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtime="", port=9999)
 dynra_lifecycle_journal(runtime="", port=9999)
 ```
 
-For a managed definition change, pass the qualified name and matching source
-text in `source_before` and `source_after`. Dynra quiesces affected components,
-compiles definitions into a staging namespace, and exposes candidates to
+For a managed definition change, pass one qualified function name and matching
+source text in `source_before` and `source_after`. Dynra refuses
+multi-definition lifecycle publication because ordinary Python global reads
+cannot be isolated across sequential assignments. It also refuses lifecycle
+staging for classes, decorators, extra top-level statements, and
+definition-time expressions that can call user code; use a process restart for
+those changes.
+
+For an accepted function change, Dynra quiesces affected components, compiles
+the definition into an isolated namespace, and exposes the candidate to
 adapters as `ChangeSet.staged_definitions`. Only after every component, binding,
 and gated task replacement prepares and validates does Dynra publish the
-definitions and one component/binding generation. Transactions serialize per
-runtime and per shared live adapter resource. Definition publication,
-preparation, validation, or commit failure restores definitions and managed
-resources when compensation succeeds. Cleanup runs after the new generation
-commits; cleanup failure retains it and records `cleanup-incomplete`. Missing
-quiescence or compensation refuses before mutation.
+function and managed component/binding generation. This boundary is
+failure-atomic, not reader-isolated: ordinary Python global reads and separate
+holder reads can straddle publication. Managed consumers must use one
+`LifecycleRuntime.snapshot()` for related components and bindings.
+Transactions serialize per runtime and per shared live adapter resource.
+Definition publication, preparation, validation, or commit failure restores
+definitions and managed resources when compensation succeeds. Cleanup runs
+after the new generation commits; cleanup failure retains it and records
+`cleanup-incomplete`. Missing quiescence or compensation refuses before
+mutation.
 
 Affected supervised tasks use their declared `never`, `manual`, `safe-point`,
 `drain`, `rolling`, or `immediate` policy. `never`, unapproved `manual`, stale
@@ -401,8 +415,9 @@ composition. Each attempted task outcome is journaled.
 `dynra_lifecycle_plan` never mutates runtime state. A reconciliation rebuilds
 only the affected dependency subgraph; unchanged prerequisites retain object
 identity. Components and bindings become visible through one immutable
-generation snapshot, so adapter code must read related values from
-`LifecycleRuntime.snapshot()` rather than call separate holders across a swap.
+generation snapshot. Adapter code must read related managed values from
+`LifecycleRuntime.snapshot()`; separate holder or module-global reads are not a
+transaction.
 The durable per-project journal records source hashes, preparation, task
 outcomes, the atomic swap point, cleanup, compensation, and restart recovery
 state. Concrete framework semantics belong in separate optional packages.

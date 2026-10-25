@@ -2,8 +2,8 @@
 
 import asyncio
 import json
-import threading
 import sys
+import threading
 import types
 
 import pytest
@@ -356,6 +356,7 @@ def test_project_local_adapter_is_explicit_and_lazy(tmp_path, monkeypatch):
 
 def test_definition_patch_refuses_before_managed_component_becomes_stale(tmp_path):
     from IPython.core.interactiveshell import InteractiveShell
+
     from dynra.core import NamespaceManager
 
     manager = NamespaceManager(project_root=tmp_path)
@@ -392,12 +393,14 @@ def test_incompatible_direct_holder_is_reported_in_lifecycle_plan(tmp_path):
     manager = NamespaceManager(project_root=tmp_path)
     module = manager.create_md("held_patch")
     manager.shell = Shell(module)
-    exec("async def value():\n    return 1\n", module.__dict__)
+    exec(  # noqa: S102
+        "async def value():\n    return 1\n", module.__dict__
+    )
     original = module.value
     holder = [original]
 
     manager.pre_execute()
-    exec("def value():\n    return 2\n", module.__dict__)
+    exec("def value():\n    return 2\n", module.__dict__)  # noqa: S102
     manager.post_execute()
     plan = manager.lifecycle.impact_plan(ChangeSet(("held_patch.value",)))
 
@@ -471,7 +474,9 @@ def test_explicit_plan_collects_core_holder_evidence_before_mutation(tmp_path):
 
     manager = NamespaceManager(project_root=tmp_path)
     module = manager.create_md("planned_holder")
-    exec("async def value():\n    return 1\n", module.__dict__)
+    exec(  # noqa: S102
+        "async def value():\n    return 1\n", module.__dict__
+    )
     holder = (module.value,)
     changes = ChangeSet(
         ("planned_holder.value",),
@@ -909,7 +914,7 @@ def test_concurrent_manager_failure_preserves_prior_commit(tmp_path):
     asyncio.run(scenario())
 
 
-def test_staged_definitions_share_staged_module_globals(tmp_path):
+def test_multi_definition_publication_refuses_before_mutation(tmp_path):
     from IPython.core.interactiveshell import InteractiveShell
 
     from dynra.core import NamespaceManager
@@ -918,38 +923,100 @@ def test_staged_definitions_share_staged_module_globals(tmp_path):
         manager = NamespaceManager(
             shell=InteractiveShell(), project_root=tmp_path
         )
-        module = manager.create_md("staged_peers")
-        manager.in_md(module.__name__)
-        assert manager.execute_code(
-            "def helper():\n    return 'old'\n\n"
-            "def handler():\n    return helper()\n"
-        ).success
-
-        class PeerAdapter(Adapter):
-            async def prepare(self, changes):
-                staged_handler = changes.staged_definitions[
-                    "staged_peers.handler"
-                ]
-                assert staged_handler() == "new"
-                assert module.handler() == "old"
-                return object()
-
-        adapter = PeerAdapter("service", ("staged_peers.*",))
-        manager.lifecycle.register_component(adapter, adapter.live)
-        await manager.reconcile_lifecycle_changes(
-            ChangeSet(
-                ("staged_peers.helper", "staged_peers.handler"),
-                source_after={
-                    "staged_peers.helper": (
-                        "def helper():\n    return 'new'\n"
-                    ),
-                    "staged_peers.handler": (
-                        "def handler():\n    return helper()\n"
-                    ),
-                },
-            )
+        module = manager.create_md("isolated_batch")
+        module.first = "old-first"
+        module.second = "old-second"
+        changes = ChangeSet(
+            ("isolated_batch.first", "isolated_batch.second"),
+            source_after={
+                "isolated_batch.first": "first = 'new-first'\n",
+                "isolated_batch.second": "second = 'new-second'\n",
+            },
         )
-        assert module.handler() == "new"
+        plan = await manager.plan_lifecycle_changes(changes)
+        assert not plan.safe
+        assert "cannot atomically observe" in str(plan.refusals)
+        with pytest.raises(
+            ReconciliationRefused, match="cannot atomically observe"
+        ):
+            await manager.reconcile_lifecycle_changes(changes)
+        assert (module.first, module.second) == (
+            "old-first",
+            "old-second",
+        )
+
+    asyncio.run(scenario())
+
+
+def test_definition_time_side_effect_refuses_without_leaking(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("isolated_default")
+        module.events = []
+        module.value = lambda: "old"
+        changes = ChangeSet(
+            ("isolated_default.value",),
+            source_after={
+                "isolated_default.value": (
+                    "def value(marker=events.append('leaked')):\n"
+                    "    return 'new'\n"
+                )
+            },
+        )
+        plan = await manager.plan_lifecycle_changes(changes)
+        assert not plan.safe
+        assert "definition-time expression" in str(plan.refusals)
+        with pytest.raises(
+            ReconciliationRefused, match="definition-time expression"
+        ):
+            await manager.reconcile_lifecycle_changes(changes)
+        assert module.events == []
+        assert module.value() == "old"
+
+    asyncio.run(scenario())
+
+
+def test_class_staging_refuses_without_running_subclass_hooks(tmp_path):
+    from IPython.core.interactiveshell import InteractiveShell
+
+    from dynra.core import NamespaceManager
+
+    async def scenario():
+        manager = NamespaceManager(
+            shell=InteractiveShell(), project_root=tmp_path
+        )
+        module = manager.create_md("isolated_class")
+        module.events = []
+
+        class Parent:
+            def __init_subclass__(cls):
+                module.events.append(cls.__name__)
+
+        module.Parent = Parent
+        adapter = Adapter("class-service", ("isolated_class.Child",))
+        manager.lifecycle.register_component(adapter, adapter.live)
+        changes = ChangeSet(
+            ("isolated_class.Child",),
+            source_after={
+                "isolated_class.Child": "class Child(Parent):\n    pass\n"
+            },
+        )
+        plan = await manager.plan_lifecycle_changes(changes)
+        assert not plan.safe
+        assert "class construction" in str(plan.refusals)
+        with pytest.raises(
+            ReconciliationRefused, match="class construction"
+        ):
+            await manager.reconcile_lifecycle_changes(changes)
+        assert module.events == []
+        assert adapter.log == []
+        assert not hasattr(module, "Child")
 
     asyncio.run(scenario())
 
@@ -1045,77 +1112,6 @@ def test_cancelled_quiescence_always_resumes_registered_component():
     asyncio.run(scenario())
 
 
-def test_staged_peer_identity_references_use_live_canonical_objects(tmp_path):
-    from IPython.core.interactiveshell import InteractiveShell
-
-    from dynra.core import NamespaceManager
-
-    async def scenario():
-        manager = NamespaceManager(
-            shell=InteractiveShell(), project_root=tmp_path
-        )
-        module = manager.create_md("canonical_staging")
-        manager.in_md(module.__name__)
-        assert manager.execute_code(
-            "class Base:\n"
-            "    def value(self):\n"
-            "        return 'old'\n\n"
-            "def helper():\n"
-            "    return 'old'\n"
-        ).success
-        live_base = module.Base
-        live_helper = module.helper
-
-        class IdentityAdapter(Adapter):
-            async def prepare(self, changes):
-                child = changes.staged_definitions[
-                    "canonical_staging.Child"
-                ]
-                consumer = changes.staged_definitions[
-                    "canonical_staging.consumer"
-                ]
-                assert child.__bases__ == (live_base,)
-                assert consumer.__defaults__ == (live_helper,)
-                assert consumer.__annotations__["dep"] is live_helper
-                return object()
-
-        adapter = IdentityAdapter("service", ("canonical_staging.*",))
-        manager.lifecycle.register_component(adapter, adapter.live)
-        await manager.reconcile_lifecycle_changes(
-            ChangeSet(
-                (
-                    "canonical_staging.Base",
-                    "canonical_staging.helper",
-                    "canonical_staging.Child",
-                    "canonical_staging.consumer",
-                ),
-                source_after={
-                    "canonical_staging.Base": (
-                        "class Base:\n"
-                        "    def value(self):\n"
-                        "        return 'new'\n"
-                    ),
-                    "canonical_staging.helper": (
-                        "def helper():\n    return 'new'\n"
-                    ),
-                    "canonical_staging.Child": "class Child(Base):\n    pass\n",
-                    "canonical_staging.consumer": (
-                        "def consumer(dep: helper = helper):\n"
-                        "    return dep()\n"
-                    ),
-                },
-            )
-        )
-        assert module.Base is live_base
-        assert module.helper is live_helper
-        assert module.Child.__bases__ == (module.Base,)
-        assert module.consumer.__defaults__ == (module.helper,)
-        assert module.consumer.__annotations__["dep"] is module.helper
-        assert module.Child().value() == "new"
-        assert module.consumer() == "new"
-
-    asyncio.run(scenario())
-
 
 def test_cancelled_mutex_grant_does_not_deadlock_next_reconcile():
     from dynra.lifecycle import _AsyncMutex
@@ -1183,106 +1179,5 @@ def test_rebound_class_peer_batch_refuses_without_partial_publication(tmp_path):
             )
         assert module.Base is original
         assert not hasattr(module, "Child")
-
-    asyncio.run(scenario())
-
-
-def test_new_peer_defaults_publish_exact_identity_in_reverse_order(tmp_path):
-    from IPython.core.interactiveshell import InteractiveShell
-
-    from dynra.core import NamespaceManager
-
-    async def scenario():
-        manager = NamespaceManager(
-            shell=InteractiveShell(), project_root=tmp_path
-        )
-        module = manager.create_md("reverse_staging")
-        adapter = Adapter("service", ("reverse_staging.*",))
-        manager.lifecycle.register_component(adapter, adapter.live)
-        await manager.reconcile_lifecycle_changes(
-            ChangeSet(
-                (
-                    "reverse_staging.consumer",
-                    "reverse_staging.helper",
-                ),
-                source_after={
-                    "reverse_staging.consumer": (
-                        "def consumer(dep=helper):\n    return dep()\n"
-                    ),
-                    "reverse_staging.helper": (
-                        "def helper():\n    return 'new'\n"
-                    ),
-                },
-            )
-        )
-        assert module.consumer.__defaults__ == (module.helper,)
-        assert module.consumer() == "new"
-
-    asyncio.run(scenario())
-
-
-def test_method_body_peer_references_are_not_eager_dependencies(tmp_path):
-    from IPython.core.interactiveshell import InteractiveShell
-
-    from dynra.core import NamespaceManager
-
-    async def scenario():
-        manager = NamespaceManager(
-            shell=InteractiveShell(), project_root=tmp_path
-        )
-        module = manager.create_md("method_peers")
-        adapter = Adapter("service", ("method_peers.*",))
-        manager.lifecycle.register_component(adapter, adapter.live)
-        await manager.reconcile_lifecycle_changes(
-            ChangeSet(
-                ("method_peers.A", "method_peers.B"),
-                source_after={
-                    "method_peers.A": (
-                        "class A:\n"
-                        "    def peer(self):\n"
-                        "        return B\n"
-                    ),
-                    "method_peers.B": (
-                        "class B:\n"
-                        "    def peer(self):\n"
-                        "        return A\n"
-                    ),
-                },
-            )
-        )
-        assert module.A().peer() is module.B
-        assert module.B().peer() is module.A
-
-    asyncio.run(scenario())
-
-
-def test_cross_module_eager_dependency_uses_staged_module_view(tmp_path):
-    from IPython.core.interactiveshell import InteractiveShell
-
-    from dynra.core import NamespaceManager
-
-    async def scenario():
-        manager = NamespaceManager(
-            shell=InteractiveShell(), project_root=tmp_path
-        )
-        base_module = manager.create_md("staged_base")
-        child_module = manager.create_md("staged_child")
-        child_module.staged_base = base_module
-        adapter = Adapter(
-            "service", ("staged_base.*", "staged_child.*")
-        )
-        manager.lifecycle.register_component(adapter, adapter.live)
-        await manager.reconcile_lifecycle_changes(
-            ChangeSet(
-                ("staged_child.Child", "staged_base.Base"),
-                source_after={
-                    "staged_child.Child": (
-                        "class Child(staged_base.Base):\n    pass\n"
-                    ),
-                    "staged_base.Base": "class Base:\n    pass\n",
-                },
-            )
-        )
-        assert child_module.Child.__bases__ == (base_module.Base,)
 
     asyncio.run(scenario())

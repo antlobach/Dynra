@@ -10,7 +10,6 @@ from .client import (
     request_runtime,
 )
 
-
 mcp = FastMCP("Dynra: live Python for coding agents")
 _MODULE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
 
@@ -98,7 +97,7 @@ def _tool_response(response, module):
         return _error_response(response["error"])
 
     success = bool(response.get("success"))
-    compact = {"success": success}
+    compact: dict[str, object] = {"success": success}
     if response.get("result") is not None:
         compact["result"] = response["result"]
     for field in ("stdout", "stderr"):
@@ -195,15 +194,19 @@ def dynra_events(
 @mcp.tool()
 def dynra_lifecycle_plan(
     definitions: list[str],
+    source_before: dict[str, str] | None = None,
+    source_after: dict[str, str] | None = None,
     runtime: str = "",
     port: int = 9999,
 ) -> dict:
-    """Plan lifecycle impact without mutating the runtime."""
+    """Plan lifecycle impact and source safety without mutating the runtime."""
     return _control(
         "lifecycle_plan",
         runtime=runtime,
         port=port,
         definitions=definitions,
+        source_before=source_before or {},
+        source_after=source_after or {},
     )
 
 

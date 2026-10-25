@@ -74,7 +74,7 @@ selection is available.
 | Read patch history | `dynra_patch_log(runtime)` | Use when definition state is unclear. |
 | Undo | `dynra_revert(target, runtime)` | Revert failed hypotheses before trying another. |
 | Save | `dynra_persist(target, runtime)` | Persist only a behaviorally verified definition. |
-| Plan resource work | `dynra_lifecycle_plan(definitions, runtime)` | No mutation. Inspect safety, restart flag, affected/preserved components, unmanaged holders, and refusals. |
+| Plan resource work | `dynra_lifecycle_plan(definitions, source_before, source_after, runtime)` | Pass the same source maps intended for reconcile. No mutation; inspect safety, restart flag, affected/preserved components, unmanaged holders, and refusals. |
 | Reconcile resources | `dynra_lifecycle_reconcile(...)` | Call only for a safe plan backed by adapters. |
 | Recover lifecycle state | `dynra_lifecycle_journal(runtime)` | Inspect swap, cleanup, compensation, and recovery state before further mutation. |
 
@@ -97,9 +97,9 @@ status call after every clean evaluation.
 4. **Read and reproduce.** Use `dynra_source`, then evaluate a focused expression
    through the real loaded consumer. Record the current event cursor when later
    attribution matters.
-5. **Patch the owner.** Send the complete top-level function or class definition
-   to its owning module. Patch one logical definition at a time unless several
-   definitions must form one transaction.
+5. **Patch the owner.** Send one complete top-level function or class definition
+   to its owning module. Patch one definition at a time; ordinary Python readers
+   cannot observe sequential multi-definition publication atomically.
 6. **Verify through retained references.** Exercise prior imports, instances,
    routes, callback registries, clients, or tasks. A direct call to the new
    definition alone is insufficient when the bug is in integration state.
@@ -178,20 +178,24 @@ identifies `old-system-active`, `old-system-restored`, `new-system-committed`,
 or `manual-recovery-required`. Do not continue automatically after manual
 recovery is required.
 
-When `source_after` contains a managed definition, reconciliation quiesces the
-affected components and compiles candidates outside the live module.
-Adapters must consume candidates from `ChangeSet.staged_definitions`; they must
-not read the old live global while preparing. Definitions publish only after all
-replacements validate. Decorated definitions refuse because replaying or
-stripping decorators changes external registration semantics; move registration
-into adapter-owned composition. Definition and resource rollback share one
-transaction boundary. Missing quiescence or compensation is a refusal; never
-apply the definition separately first.
+When `source_after` contains a managed definition, lifecycle reconciliation
+accepts one side-effect-free function definition. It refuses classes,
+decorators, extra top-level statements, multi-definition batches, and eager
+defaults or annotations that can call user code; restart for those changes.
+This prevents staging from invoking metaclasses, subclass hooks, or shared-state
+mutations before validation.
+
+For an accepted function, reconciliation quiesces affected components and
+compiles the candidate outside the live module. Adapters must consume it from
+`ChangeSet.staged_definitions`; they must not read the old live global while
+preparing. The function publishes only after all replacements validate.
+Definition and resource rollback share one failure boundary. Missing quiescence
+or compensation is a refusal; never apply the definition separately first.
 
 Only the affected component subgraph is rebuilt; dependencies outside it must
 retain identity. Read related components and bindings from one
-`LifecycleRuntime.snapshot()` generation. Separate holder reads can straddle a
-swap and are not a transaction.
+`LifecycleRuntime.snapshot()` generation. Ordinary module-global reads and
+separate holder reads can straddle publication and are not a transaction.
 
 `BindingKind.PRESERVED` retains identity, `RECOMPUTE` and `REGISTRY` require
 transactional prepare/validate operations, `COMPONENT` follows its owning

@@ -8,8 +8,9 @@ from dynra.mcp import (
     dynra_bootstrap_status,
     dynra_diff,
     dynra_evaluate,
-    dynra_modules,
     dynra_events,
+    dynra_lifecycle_plan,
+    dynra_modules,
     dynra_patch_log,
     dynra_persist,
     dynra_repl,
@@ -173,6 +174,19 @@ def test_structured_runtime_tools(tmp_path):
         assert bootstrap_status["result"]["completed"] is False
         assert dynra_bootstrap(port=port)["result"]["completed"] is True
         assert dynra_evaluate(code="booted", port=port)["result"] == "42"
+        class_plan = dynra_lifecycle_plan(
+            ["pkg.mod.Child"],
+            source_after={
+                "pkg.mod.Child": "class Child:\n    pass\n"
+            },
+            port=port,
+        )
+        assert class_plan["success"] is True
+        assert class_plan["result"]["safe"] is False
+        assert "class construction" in str(
+            class_plan["result"]["refusals"]
+        )
+
 
         patched = dynra_evaluate(
             module="pkg.mod",
