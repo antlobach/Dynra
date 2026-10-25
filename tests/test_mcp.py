@@ -28,17 +28,17 @@ def start_server(port):
 
 
 def test_single_tool_agent_workflow():
-    server = pexpect.spawn(
-        sys.executable, ["-m", "dynra"], encoding="utf-8"
-    )
+    port = free_ports(1)[0]
+    server = start_server(port)
+
+    def call(**arguments):
+        return dynra_repl(port=port, **arguments)
 
     try:
-        server.expect(r"user> ", timeout=10)
-
-        response = dynra_repl(code="1 + 1")
+        response = call(code="1 + 1")
         assert response == {"success": True, "result": "2"}
 
-        response = dynra_repl(
+        response = call(
             module="agent_lib",
             code="def get_value(): return 1",
             create=True,
@@ -50,35 +50,35 @@ def test_single_tool_agent_workflow():
             "live": ["agent_lib.get_value"],
         }
 
-        response = dynra_repl(
+        response = call(
             module="agent_app",
             code="from agent_lib import get_value",
             create=True,
         )
         assert response["success"]
-        response = dynra_repl(module="agent_app", code="get_value()")
+        response = call(module="agent_app", code="get_value()")
         assert response["result"] == "1"
 
-        response = dynra_repl(
+        response = call(
             module="agent_lib",
             code="def get_value(): return 100",
         )
         assert response["success"]
-        response = dynra_repl(module="agent_app", code="get_value()")
+        response = call(module="agent_app", code="get_value()")
         assert response["result"] == "100"
 
-        response = dynra_repl(
+        response = call(
             module="agent_app", code="print('visible output')"
         )
         assert response == {"success": True, "stdout": "visible output"}
 
-        response = dynra_repl(module="invalid-module", code="x = 1")
+        response = call(module="invalid-module", code="x = 1")
         assert response == {
             "success": False,
             "error": "Invalid Python module name: 'invalid-module'",
         }
 
-        response = dynra_repl(code="1 / 0")
+        response = call(code="1 / 0")
         assert not response["success"]
         assert "ZeroDivisionError" in response["stdout"]
         assert response["error"] == "ZeroDivisionError: division by zero"
