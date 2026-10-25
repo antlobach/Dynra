@@ -82,6 +82,28 @@ dynra clean
 validates registered processes against the Dynra handshake and removes stale
 records. Set `DYNRA_RUNTIME_DIR` to override the registry location.
 
+### Explicit project bootstrap
+
+Dynra never starts the application automatically. A project can declare an
+optional module or callable that developers invoke explicitly:
+
+```toml
+[tool.dynra]
+bootstrap = "dev.dynra:bootstrap"
+```
+
+```python
+def bootstrap(namespace):
+    service = create_development_service()
+    namespace["service"] = service
+    return {"client": service.test_client()}
+```
+
+Run it inside Dynra with `bootstrap()`. The callable receives the persistent
+`user` namespace and may mutate it or return a mapping of names to add.
+Successful bootstraps run once unless `bootstrap(force=True)` is requested.
+`bootstrap_status()` reports configuration, attempts, completion, and exports.
+
 ## Agents
 
 The repository includes a [Dynra agent skill](.agents/skills/dynra/SKILL.md). Give that skill to an agent that can call the MCP server. It defines the live-development loop, patching constraints, failure handling, and the point at which a verified live change should become a source edit.

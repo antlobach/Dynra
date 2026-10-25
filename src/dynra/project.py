@@ -36,12 +36,23 @@ class ModuleInfo:
     is_package: bool
 
 
+@dataclass(frozen=True)
+class ProjectConfig:
+    bootstrap: str | None = None
+
+
 class ProjectLayout:
     """Resolved project roots and statically discovered Python modules."""
 
-    def __init__(self, root: Path, source_roots: tuple[Path, ...]):
+    def __init__(
+        self,
+        root: Path,
+        source_roots: tuple[Path, ...],
+        config: ProjectConfig | None = None,
+    ):
         self.root = root.resolve()
         self.source_roots = source_roots
+        self.config = config or ProjectConfig()
         self.modules = self._discover_modules()
 
     @classmethod
@@ -53,7 +64,29 @@ class ProjectLayout:
             configured.add(conventional.resolve())
         configured.add(project_root)
         roots = tuple(sorted(configured, key=lambda path: (path != project_root, str(path))))
-        return cls(project_root, roots)
+        return cls(project_root, roots, cls._project_config(project_root))
+
+    @staticmethod
+    def _project_config(root: Path) -> ProjectConfig:
+        pyproject = root / "pyproject.toml"
+        if not pyproject.is_file():
+            return ProjectConfig()
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return ProjectConfig()
+        bootstrap = data.get("tool", {}).get("dynra", {}).get("bootstrap")
+        if bootstrap is None:
+            return ProjectConfig()
+        if not isinstance(bootstrap, str) or not bootstrap.strip():
+            raise ValueError("[tool.dynra].bootstrap must be a non-empty string")
+        target = bootstrap.strip()
+        module, separator, attribute = target.partition(":")
+        if not module or not all(part.isidentifier() for part in module.split(".")):
+            raise ValueError(f"Invalid Dynra bootstrap module: {module!r}")
+        if separator and (not attribute or not attribute.isidentifier()):
+            raise ValueError(f"Invalid Dynra bootstrap callable: {attribute!r}")
+        return ProjectConfig(bootstrap=target)
 
     @staticmethod
     def _configured_roots(root: Path) -> set[Path]:
