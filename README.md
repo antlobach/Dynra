@@ -11,7 +11,7 @@
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/antlobach/Dynra/ci.yml?branch=main&amp;style=flat-square&amp;label=tests" alt="Tests" height="20"></a>
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-%E2%89%A565%25-brightgreen?style=flat-square" alt="Coverage ≥65%" height="20"></a>
   <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
-  <a href="https://pypi.org/project/dynra/"><img src="https://img.shields.io/pypi/v/dynra?style=flat-square&amp;logo=pypi&amp;logoColor=white" alt="PyPI" height="20"></a>
+  <a href="https://pypi.org/project/dynra/"><img src="https://img.shields.io/badge/pypi-v0.3.1-ea7233?style=flat-square&amp;logo=pypi&amp;logoColor=white" alt="PyPI v0.3.1" height="20"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/antlobach/Dynra?style=flat-square" alt="Apache-2.0 license" height="20"></a>
   <a href="https://deepwiki.com/antlobach/Dynra"><img src="https://raw.githubusercontent.com/antlobach/Dynra/main/assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>
