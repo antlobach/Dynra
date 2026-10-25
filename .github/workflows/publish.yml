@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +24,13 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: uv run pytest -q
       - run: uv build --out-dir dist
-      - run: uv build --project packages/dynra-stario --out-dir dist
-      - run: uvx twine check dist/*
+      - run: uv build --project packages/dynra-stario --out-dir release-artifacts/stario
+      - run: uvx twine check dist/* release-artifacts/stario/*
+      - name: Attach optional adapter distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" release-artifacts/stario/* --clobber
       - name: Publish distribution
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
