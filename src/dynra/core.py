@@ -1923,9 +1923,12 @@ class NamespaceManager:
             self.prev_objects = dict(namespace)
             return
         for name, obj in list(namespace.items()):
-            if name.startswith("_") or getattr(obj, "__module__", None) != module_name:
+            if getattr(obj, "__module__", None) != module_name:
                 continue
             if not isinstance(obj, (types.FunctionType, type)):
+                continue
+            # Ignore shell result aliases such as `_`, not private definitions.
+            if name.startswith("_") and name != obj.__name__:
                 continue
             previous = self.prev_objects.get(name)
             if previous is obj:
