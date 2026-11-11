@@ -3,39 +3,53 @@
 </p>
 
 <p align="center">
-    <strong>Work with Python in a running process.</strong><br>
-    Test supported code changes without losing the process's in-memory state.
+    <strong>Develop Python in a long-lived session.</strong><br>
+    Define code, evaluate it, and test changes against the same live application state.
 </p>
 
 <p align="center">
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/antlobach/Dynra/ci.yml?branch=main&amp;style=flat-square&amp;label=tests" alt="Tests" height="20"></a>
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-%E2%89%A565%25-brightgreen?style=flat-square" alt="Coverage ≥65%" height="20"></a>
   <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
-  <a href="https://pypi.org/project/dynra/"><img src="https://img.shields.io/badge/pypi-v0.4.0-ea7233?style=flat-square&amp;logo=pypi&amp;logoColor=white" alt="PyPI v0.4.0" height="20"></a>
+  <a href="https://pypi.org/project/dynra/"><img src="https://img.shields.io/badge/pypi-v0.4.1-ea7233?style=flat-square&amp;logo=pypi&amp;logoColor=white" alt="PyPI v0.4.1" height="20"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/antlobach/Dynra?style=flat-square" alt="Apache-2.0 license" height="20"></a>
   <a href="https://deepwiki.com/antlobach/Dynra"><img src="https://raw.githubusercontent.com/antlobach/Dynra/main/assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>
 
-## Overview
+## REPL-driven Python development
 
-Dynra keeps a long-lived Python session for your project. An AI agent can use it through tools. A developer can use the same session from Emacs. A running Dynra session is called a runtime.
+Dynra lets you build a Python application inside a process that stays alive.
+You can work from Emacs or an AI agent.
 
-Dynra finds the project's Python modules. Choose a module. Run code in that
-module's context. The code can use the module's imports, variables, functions,
-and live objects.
+In REPL-driven development, you define a small piece of code, run it, inspect
+the result, and refine it in the same session. Your application objects,
+loaded data, and imports remain available between evaluations.
 
-Inspect results. Test supported changes in the running program without losing
-its in-memory state. Start the application yourself when you need its live
-state. Some changes need an adapter or a process restart.
+You can move between project modules and run code in each module's context.
+For example, change a pricing function in `shop.pricing`. Then call an existing
+basket in `shop.checkout` to test the change against its current items.
+Supported updates keep the existing objects and imported references in use.
 
-```mermaid
-flowchart LR
-    A[Emacs or AI agent] --> D[Dynra session for the project]
-    D --> M[Choose a project module]
-    M --> E[Run code in that module's context]
-    E --> R[Inspect results or change code]
-    R --> D
-```
+The development loop is:
+
+1. Start Dynra for the project. Prepare application state when you need it.
+2. Select a module and evaluate one function or class.
+3. Call it with known inputs or through existing application objects.
+4. Refine the definition until the result is correct.
+5. Save the verified definition to its source file.
+6. Continue with the next piece in the same session.
+
+You do not need to restart the application and reconstruct its state after
+each supported change. Keep the process alive while you develop.
+Some changes still require an adapter or a full restart.
+
+Dynra does not start your application for you. Start it once through your
+development setup or an explicit bootstrap. Saving definitions does not save
+runtime data or ordinary assignments. Source files and tests remain the
+lasting record of your work.
+
+See the [agent skill](.agents/skills/dynra/SKILL.md) for the live development
+workflow, module navigation, persistence, and restart rules.
 
 ## Capabilities
 

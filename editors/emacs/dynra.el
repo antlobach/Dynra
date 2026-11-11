@@ -4,7 +4,7 @@
 ;; Author: Dynra contributors
 ;; Keywords: languages, python, tools
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.4.0
+;; Version: 0.4.1
 
 ;;; Commentary:
 
