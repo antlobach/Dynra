@@ -1,45 +1,106 @@
 ---
 name: dynra
-description: Use Dynra for state-preserving interactive Python development through runtime discovery, structured MCP tools, live definition patches, source healing, explicit bootstrap, lifecycle plans, verification, revert, and persistence.
+description: Develop Python through a long-lived Dynra REPL. Define and evaluate small functions or classes in project modules, test them against retained application state, save verified definitions, and continue without routine restarts.
 ---
 
 # Dynra
 
-Use Dynra to develop Python inside an existing long-running process. Preserve
-loaded data, instances, imports, caches, registrations, and application state
-while inspecting, changing, and verifying behavior. Treat the runtime as a fast
-feedback environment, not as a replacement for source control or durable tests.
+## Develop in the live process
 
-## When to use Dynra
+REPL-driven development means you keep one Python process alive while you build
+the program. A REPL accepts code, runs it, and returns a result. With Dynra, an
+agent uses MCP tools to perform that interaction.
 
-Use Dynra when retained process state has value:
+Start a Dynra runtime for the project. Connect the MCP adapter to that runtime.
+Prepare application state when the task needs it. Then develop one small piece
+at a time inside that same process.
 
-- reproduce a state-dependent bug in the process where it occurs;
-- inspect loaded modules, objects, imports, holders, and generations;
-- redefine compatible functions or classes and exercise real consumers;
-- evolve existing instances without rebuilding expensive state;
-- test behavior through routes, callbacks, registries, schedulers, or clients;
-- compare a proven live definition with disk, then persist or revert it;
-- reconcile resources only when an installed adapter supplies lifecycle semantics.
+The live session contains your working functions, classes, imported modules,
+and application objects. You can inspect an object, change a function, and call
+that function against the same object. You do not need to reconstruct the data
+after each supported change.
 
-Use the ordinary edit/restart loop when no useful state exists, dependencies or
-interpreter configuration changed, native state changed, currently executing or
-suspended frames must change, irreversible external effects occurred, or Dynra
-reports a restart boundary. Never weaken safe patching or ignore a refusal.
+Use this development loop:
 
-## Preconditions
+1. **Choose a module.** Find the real project module that should own the code.
+2. **Define a small piece.** Evaluate one complete function or class in that module.
+3. **Exercise it now.** Call the function with known inputs. Inspect the result and any state changes.
+4. **Improve it in place.** Evaluate a revised definition if the result is wrong.
+   Test through existing callers and objects as well as direct calls.
+5. **Save the verified code.** Review the live diff. Persist the tested definition to its source file.
+6. **Continue in the same process.** Choose the next function or another module.
+   Keep the runtime and useful application state alive.
+
+Do not use a new Python process for each expression. Do not rewrite a whole
+module and rerun the application for each small change. Do not reload a module
+to make an ordinary supported function update visible.
+
+The runtime owns the state. Individual MCP calls can use separate connections
+to that same runtime. Reconnecting to it does not create a new application.
+Starting another runtime does create a separate process with separate state.
+The runtime does not store the agent's conversation or replace source control.
+
+Keep full restarts to a minimum, not to zero. Restart when Dynra reports a
+restart boundary or when the requested change cannot preserve the live state
+safely. Never disable a safety check just to avoid restarting.
+
+### Example: define, evaluate, save, continue
+
+This example uses the `dynra-demo` project. Its `dynra_demo.pricing` and
+`dynra_demo.app` modules already have source files. Replace `RUNTIME_ID` with
+the runtime ID from discovery.
+
+```python
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.pricing",
+    code="def discount_total(prices, rate):\n    return round(sum(prices) * (1 - rate), 2)",
+)
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.pricing",
+    code="discount_total([10, 20], 0.1)",
+)
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.app",
+    code="from dynra_demo.pricing import discount_total\ndiscount_total(basket.prices, 0.1)",
+)
+dynra_diff(runtime="RUNTIME_ID")
+dynra_persist(
+    runtime="RUNTIME_ID",
+    target="dynra_demo.pricing.discount_total",
+)
+```
+
+The direct call should return `27.0`. The application call uses the existing
+`basket` and its current prices. If the behavior is wrong, redefine
+`discount_total` in `dynra_demo.pricing` and repeat the calls before saving it.
+
+Persistence saves the function definition. It does not save the test expression,
+the temporary import in `dynra_demo.app`, or the basket's data. Add any imports
+that the saved application needs through normal source edits.
+
+## Start once and reconnect
+
+### Project and MCP setup
 
 Dynra is a development dependency in the target project:
 
 ```bash
 uv add --dev dynra
-uv run dynra
+uv run dynra --port 0
 ```
 
-The runtime does not start the application. It indexes project modules, listens
-locally, and registers its runtime ID only after the socket is ready. A project
-may configure `[tool.dynra].bootstrap`; call it explicitly only when the task
-needs application-owned live state.
+Discover existing runtimes before starting another one. If none belongs to the
+target project, start this command from that project's root. Keep it running
+in a managed terminal or background process. Port `0` lets the OS assign a
+free port. Dynra registers the actual endpoint after its server is ready.
+
+Dynra indexes project modules without importing all of them. It does not start
+the application. Check `[tool.dynra].bootstrap` when you need application state.
+Call the configured bootstrap once, or use the project's explicit development
+startup procedure. Do not repeat startup on each tool call.
 
 The MCP process must run from the target project through its environment:
 
@@ -56,9 +117,10 @@ The MCP process must run from the target project through its environment:
 
 ## Tool selection
 
-Prefer structured tools. Use `dynra_evaluate` only for behavior-specific Python.
-`dynra_repl` is a port-based compatibility tool; do not use it when runtime
-selection is available.
+Use `dynra_evaluate` for live Python code. Use the other tools for discovery,
+source inspection, diffs, persistence, and lifecycle operations.
+`dynra_repl` is the older port-based evaluation tool. Prefer runtime IDs so
+each call selects the same project process.
 
 | Need | Tool | Constraint |
 | --- | --- | --- |
@@ -68,7 +130,7 @@ selection is available.
 | Browse symbols | `dynra_symbols(module, runtime)` | Prefer before import/evaluation. |
 | Read implementation | `dynra_source(target, runtime)` | Target is a qualified top-level function or class. |
 | Start configured app state | `dynra_bootstrap_status`, `dynra_bootstrap` | Explicit only; successful bootstrap is once unless forced. |
-| Explore or patch | `dynra_evaluate(code, module, create, runtime)` | Select the owning module; `create=True` is only for intentional scratch namespaces. |
+| Explore or patch | `dynra_evaluate(code, module, create, runtime)` | Select the owning module. Use `create=True` only for an intentional scratch module. |
 | Inspect divergence | `dynra_diff(runtime)` | Review before persistence. |
 | Read audit history | `dynra_events(after, limit, runtime)` | Save the last sequence and request later events by cursor. |
 | Read patch history | `dynra_patch_log(runtime)` | Use when definition state is unclear. |
@@ -83,48 +145,117 @@ present. `source_sync` appears when source state is actionable. A missing
 `source_sync` means no actionable source state for that response; do not issue a
 status call after every clean evaluation.
 
-## Fully interactive development loop
+## Select the runtime and module
 
-1. **Discover and pin the runtime.** Call `dynra_runtimes`, select the target by
-   project, then use its runtime ID for every call. Call `dynra_status` before
-   mutation. Never connect to a similarly numbered port by assumption.
-2. **Discover before importing.** Use `dynra_modules` and `dynra_symbols` to find
-   the owning module. Import failures are evidence; never hide one with a
-   synthetic namespace.
-3. **Bootstrap only if needed.** Use `dynra_bootstrap_status`. Call
-   `dynra_bootstrap` when the task requires the application's initialized object
-   graph. Static inspection and pure function work usually do not need it.
-4. **Read and reproduce.** Use `dynra_source`, then evaluate a focused expression
-   through the real loaded consumer. Record the current event cursor when later
-   attribution matters.
-5. **Patch the owner.** Send one complete top-level function or class definition
-   to its owning module. Patch one definition at a time; ordinary Python readers
-   cannot observe sequential multi-definition publication atomically.
-6. **Verify through retained references.** Exercise prior imports, instances,
-   routes, callback registries, clients, or tasks. A direct call to the new
-   definition alone is insufficient when the bug is in integration state.
-7. **Read source state.** Inspect `source_sync` from the response:
-   - `healed`: external top-level definition edits were safely applied;
-   - `live-newer`: the process contains unpersisted live definitions;
-   - `conflict`: both disk and live state changed; stop and resolve explicitly;
-   - `restart-required`: imports, decorators, unsafe constants, or another
-     boundary changed; do not pretend the process matches disk;
-   - `error`: repair the source error before further mutation.
-8. **Plan lifecycle impact when resources are involved.** Call
-   `dynra_lifecycle_plan` before any component reconciliation. Continue only if
-   `safe` is true and `requires_process_restart` is false. Preserve unaffected
-   components. Never suppress unmanaged-holder, missing-operation, task-policy,
-   cycle, or restart-only refusals.
-9. **Reconcile and inspect.** Call `dynra_lifecycle_reconcile` only with the
-   reviewed definition set and source snapshots. On failure, inspect
-   `dynra_lifecycle_journal`: determine whether the old system stayed active,
-   was restored, or manual recovery is required before doing anything else.
-10. **Converge with source.** Use `dynra_diff`. Revert unsuccessful work or
-    persist the exact verified definition. Apply other ordinary source and
-    configuration edits through the coding workflow.
-11. **Run durable checks.** Execute the project's tests/checks and an actual
-    smoke path. Live verification proves the retained process; checks prove the
-    committed deliverable.
+Call `dynra_runtimes` to find the target project. Use its runtime ID for later
+calls. Check the project path and Python executable with `dynra_status` before
+the first change. Do not guess or scan ports.
+
+Use `dynra_modules` to list project modules. Use `dynra_symbols` and
+`dynra_source` to inspect code before importing it. Public symbol listings omit
+names that start with `_`. Private definitions still support evaluation and
+compatible live updates.
+
+Pass the Python import name, such as `shop.pricing`, to `dynra_evaluate`.
+Do not pass a file path. A source folder such as `src/` is not part of the
+import name unless the project defines it as a package.
+
+Each evaluation selects its module before it runs the code. Code in
+`shop.pricing` can use the imports and variables that exist in `shop.pricing`.
+Code in `shop.checkout` sees that module's own names. A module does not gain
+another module's names just because you evaluated there earlier.
+
+Switch modules by changing the `module` argument on the next tool call.
+Keep the same runtime ID. The objects in previously visited modules remain
+alive. Do not depend on whichever module another client last selected.
+
+Define a function in its owning module. If checkout imported a function from
+pricing, redefine it in pricing. Then call it through checkout's existing
+reference to check that the change reached its real consumer.
+
+### Terminal commands and scratch work
+
+In the terminal REPL, `in_md("shop.pricing")` switches the active module.
+`require_md("shop.pricing")` imports it without switching.
+`ls_md()` lists modules. `dir_md("shop.pricing")` lists its public names.
+
+The initial `user` module is for experiments without a project source file.
+`create_md(name)` or `create=True` creates another scratch module.
+Use scratch modules for disposable exploration, not for application code that
+you intend to save through `dynra_persist`.
+
+For a new project module, create its minimal `.py` file and package structure
+in the correct source folder. Then evaluate in that real module.
+Dynra can resolve a new importable module without restarting the process.
+Never create a scratch module to hide a failed project import.
+
+### First imports and application state
+
+The first evaluation in an unloaded module imports it. Python executes that
+module's top-level code, including assignments and imports. Inspect it first if
+importing it could start services or perform external actions.
+
+Call `dynra_bootstrap_status` before starting configured application resources.
+Call `dynra_bootstrap` once when the task needs those resources.
+Do not bootstrap for static inspection or a pure function experiment.
+Keep the application's objects in their real modules rather than recreating
+them in each evaluation.
+
+## Test and save each increment
+
+Inspect `success`, `result`, `stdout`, `stderr`, and `error` after evaluation.
+Check results against known inputs and expected behavior. For stateful changes,
+call an existing instance, route, callback, or imported reference.
+
+Send one complete top-level definition at a time. Keep safe update modes
+enabled. Other Python code can observe separate definition publications between
+calls. An evaluation can change data or cause external effects that definition
+rollback cannot reverse.
+
+Use `dynra_diff` to compare live definitions with source. Save only verified
+definitions with `dynra_persist(target="shop.pricing.function_name", ...)`.
+Dynra can append a new definition to an existing project module file.
+It refuses persistence if the target has no project source file.
+
+Persistence does not save ordinary assignments, imports, configuration,
+dependencies, or runtime data. Update the required source files for these
+changes. Recheck the saved definition through the live consumer.
+Use version control and the project's tests to check the durable result.
+You can run those checks without discarding the development runtime.
+
+Use `dynra_revert` to undo a failed definition change before another approach.
+Record an event cursor when the history needs to distinguish several attempts.
+Do not force persistence over an external source edit.
+
+### Interpret source status
+
+Inspect `source_sync` when a response includes it:
+
+- `healed`: Dynra applied supported edits from the source file.
+- `live-newer`: The session contains definitions that you did not save yet.
+  This is not an evaluation failure. Test the code before persisting it.
+- `conflict`: The source file and live session changed the same definition.
+  Stop and choose which version to keep.
+- `restart-required`: A change crossed a boundary that live updates cannot handle.
+- `error`: Repair the reported source error before further changes.
+
+If managed application resources need an update, request `dynra_lifecycle_plan`
+before changing them. Continue only if the plan is safe and needs no process
+restart. Use `dynra_lifecycle_reconcile` to apply that reviewed plan.
+Read `dynra_lifecycle_journal` after a failure. Do not continue if it reports
+manual recovery is required.
+
+## When a restart is necessary
+
+Keep the runtime alive while useful state remains and supported updates work.
+A restart can be necessary after dependency or interpreter changes, unsafe
+imports, incompatible object layouts, native changes, or unmanaged resource
+changes. Dynra cannot rewrite executing or suspended frames.
+
+Preserve the diagnostic evidence before a required restart. After restarting,
+discover the new runtime ID and rebuild application state through the project's
+startup procedure. Do not reuse assumptions about objects from the old process.
+Do not weaken safe modes or repeatedly retry an unsafe change.
 
 ## Patch and source rules
 
@@ -221,8 +352,9 @@ rewritten.
 
 ## Failure handling
 
-- **No runtime:** ask the developer to start `uv run dynra` in the target project;
-  the MCP adapter does not start it.
+- **No runtime:** start `uv run dynra --port 0` from the target project in a
+  managed process, then discover its registered runtime ID. The MCP adapter
+  does not start the application or runtime.
 - **Ambiguous runtime:** use the exact runtime ID returned by `dynra_runtimes`.
 - **Import failure:** fix the environment, dependency, or module. Do not use
   `create=True` as fallback.
