@@ -3,73 +3,77 @@
 </p>
 
 <p align="center">
-  <strong>Live Python runtime for coding agents.</strong><br>
-  Inspect, patch, and verify running software without restarting the process or losing its state.
+    <strong>Work with Python in a running process.</strong><br>
+    Test supported code changes without losing the process's in-memory state.
 </p>
 
 <p align="center">
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/antlobach/Dynra/ci.yml?branch=main&amp;style=flat-square&amp;label=tests" alt="Tests" height="20"></a>
   <a href="https://github.com/antlobach/Dynra/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/coverage-%E2%89%A565%25-brightgreen?style=flat-square" alt="Coverage ≥65%" height="20"></a>
   <img src="https://img.shields.io/badge/python-3.10--3.14-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10–3.14" height="20">
-  <a href="https://pypi.org/project/dynra/"><img src="https://img.shields.io/badge/pypi-v0.3.1-ea7233?style=flat-square&amp;logo=pypi&amp;logoColor=white" alt="PyPI v0.3.1" height="20"></a>
+  <a href="https://pypi.org/project/dynra/"><img src="https://img.shields.io/badge/pypi-v0.4.0-ea7233?style=flat-square&amp;logo=pypi&amp;logoColor=white" alt="PyPI v0.4.0" height="20"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/antlobach/Dynra?style=flat-square" alt="Apache-2.0 license" height="20"></a>
   <a href="https://deepwiki.com/antlobach/Dynra"><img src="https://raw.githubusercontent.com/antlobach/Dynra/main/assets/deepwiki-badge.svg" alt="Ask DeepWiki" height="20"></a>
 </p>
 
 ## Overview
 
-Dynra lets a coding agent develop Python software interactively inside a persistent process. The agent can navigate project modules, execute arbitrary Python in their namespaces, add or redefine functions and classes, and exercise each change immediately against the running application.
+Dynra keeps a long-lived Python session for your project. An AI agent can use it through tools. A developer can use the same session from Emacs. A running Dynra session is called a runtime.
 
-Compatible function and class identities stay stable while the software evolves. Existing imports, registries, closures, partials, and class instances can continue to refer to the patched objects.
+Dynra finds the project's Python modules. Choose a module. Run code in that
+module's context. The code can use the module's imports, variables, functions,
+and live objects.
+
+Inspect results. Test supported changes in the running program without losing
+its in-memory state. Start the application yourself when you need its live
+state. Some changes need an adapter or a process restart.
 
 ```mermaid
 flowchart LR
-    A[Coding agent] -->|dynra_repl| M[MCP adapter]
-    M --> R[Long-lived IPython process]
-    R --> N[Project module namespaces]
-    R --> P[Live patch engine]
-    P --> O[Existing references and instances]
-    O --> V[Verification against preserved state]
-    V --> A
+    A[Emacs or AI agent] --> D[Dynra session for the project]
+    D --> M[Choose a project module]
+    M --> E[Run code in that module's context]
+    E --> R[Inspect results or change code]
+    R --> D
 ```
 
 ## Capabilities
 
-- Discovers modules from the repository root, `src/`, and configured setuptools, Poetry, or Hatch source roots.
-- Lists an unloaded module's public symbols without importing it.
-- Executes arbitrary Python in a selected module namespace.
-- Preserves compatible function and class identities across redefinitions.
-- Updates existing imported references and mutable holders.
-- Migrates existing instances through an optional `__dynra_update__` hook.
-- Skips registration decorators when replacing an existing decorated definition.
-- Rolls back definition changes when a multi-definition evaluation fails.
-- Shows, reverts, and persists live changes.
+- Finds modules in the project root, `src/`, and setuptools, Poetry, or Hatch source folders.
+- Lists public names in a module without importing the module.
+- Runs Python code in the selected module's context.
+- Keeps compatible function and class objects in place when you redefine them.
+- Updates existing imports and mutable objects that refer to patched code.
+- Can update existing instances through an optional `__dynra_update__` method.
+- Does not repeat registration decorators when it replaces an existing definition.
+- Reverts definition changes when a multi-definition evaluation fails.
+- Shows, reverts, and saves live code changes.
 
 ## Install and start
 
-Add Dynra as a development dependency of the target project:
+Add Dynra to the project's development dependencies:
 
 ```bash
 cd /path/to/target-project
 uv add --dev dynra
 ```
 
-Start Dynra from the target project's root:
+Start Dynra from the project root:
 
 ```bash
 uv run dynra
 ```
 
-Dynra runs in the target project's virtual environment, so project dependencies
-are importable. It reads the target's `pyproject.toml`, activates its source
-roots, and indexes its Python modules without importing them. Dynra does not
-start the application; import or bootstrap the application explicitly when its
-live state is needed. The runtime listens on `127.0.0.1:9999` by default. Use
-`uv run dynra --port PORT` to select another port.
+Dynra uses the project's Python environment. This makes the project's installed
+packages available to Dynra. Dynra reads `pyproject.toml` to find source
+folders and Python modules. It finds modules without importing them.
 
-Each runtime registers its identity, project root, process, interpreter, and
-endpoint in the local Dynra registry after its socket is ready. Manage running
-runtimes without scanning ports:
+Dynra does not start your application. Start the application yourself when you
+need its live state. The default port is `9999`. Use `uv run dynra --port PORT`
+to select another port.
+
+After the server starts, Dynra records its ID, project path, process ID, Python
+executable, and port in a local registry. Use these commands to manage sessions:
 
 ```bash
 dynra list
@@ -78,9 +82,9 @@ dynra stop RUNTIME_ID
 dynra clean
 ```
 
-`status` and `stop` also accept an unambiguous port or project path. `clean`
-validates registered processes against the Dynra handshake and removes stale
-records. Set `DYNRA_RUNTIME_DIR` to override the registry location.
+`status` and `stop` also accept a port or project path that selects one session.
+`clean` checks each record and removes records for stopped or invalid processes.
+Set `DYNRA_RUNTIME_DIR` to change the registry folder.
 
 ### Emacs setup
 
@@ -94,8 +98,8 @@ uv add --dev dynra
 
 #### 2. Install the Emacs plugin
 
-Add the plugin directory from your Dynra checkout to your Emacs configuration
-(usually `~/.emacs.d/init.el` or `~/.config/emacs/init.el`):
+Add the plugin folder to Emacs' `load-path` in your configuration.
+Use `~/.emacs.d/init.el` or `~/.config/emacs/init.el`.
 
 ```elisp
 (add-to-list 'load-path "/path/to/Dynra/editors/emacs")
@@ -103,33 +107,35 @@ Add the plugin directory from your Dynra checkout to your Emacs configuration
 (dynra-auto-mode 1)
 ```
 
-Replace the path with the actual checkout path, then restart Emacs or evaluate
-the configuration. The plugin requires Emacs 27.1 or newer.
+Change the path to your Dynra checkout. Restart Emacs or reload the configuration.
+Dynra requires Emacs 27.1 or later.
 
 #### 3. Start Dynra and evaluate Python
 
-Open a Python file inside the project, then run `M-x dynra-jack-in` or press
-`C-c C-x j`. Dynra starts with the project's `uv` environment and connects to
-the project runtime. Evaluate the statement at point with `C-x C-e`, a function
-or class with `C-c C-c`, or the whole buffer with `C-c C-k`; results appear
-inline and in the echo area.
+Open a Python file in the project. Run `M-x dynra-jack-in` or press
+`C-c C-x j`. Dynra starts in the project's `uv` environment and connects
+Emacs to that project's runtime.
 
-`dynra-auto-mode` connects to an already-running runtime when a project file
-opens. Starting a runtime automatically is optional:
+Press `C-x C-e` to run the Python statement at point. Press `C-c C-c` to run
+the function or class at point. Press `C-c C-k` to run the whole buffer.
+Dynra shows results inline and in the echo area.
+
+`dynra-auto-mode` connects to an existing runtime when you open a project file.
+Auto-start is optional.
 
 ```elisp
 (setq dynra-auto-jack-in t)
 ```
 
 If Emacs cannot find `uv`, Dynra checks `~/.local/bin` and common Homebrew and
-Linuxbrew locations. For a custom location, set `dynra-command` to the absolute
-`uv` path. See [`editors/emacs/README.md`](editors/emacs/README.md) for all
-commands and customization options.
+Linuxbrew folders. For another path, set `dynra-command` to the full path to
+`uv`. See [`editors/emacs/README.md`](editors/emacs/README.md) for all commands
+and settings.
 
 ### Explicit project bootstrap
 
-Dynra never starts the application automatically. A project can declare an
-optional module or callable that developers invoke explicitly:
+Dynra does not start your application. To prepare application state, configure
+a bootstrap module or function in `pyproject.toml`:
 
 ```toml
 [tool.dynra]
@@ -137,23 +143,28 @@ bootstrap = "dev.dynra:bootstrap"
 ```
 
 ```python
-def bootstrap(namespace):
+def bootstrap(module_globals):
     service = create_development_service()
-    namespace["service"] = service
+    module_globals["service"] = service
     return {"client": service.test_client()}
 ```
 
-Run it inside Dynra with `bootstrap()`. The callable receives the persistent
-`user` namespace and may mutate it or return a mapping of names to add.
-Successful bootstraps run once unless `bootstrap(force=True)` is requested.
-`bootstrap_status()` reports configuration, attempts, completion, and exports.
+Run `bootstrap()` inside Dynra. A configured function receives a dictionary of
+names from the `user` module. It can change that dictionary or return names
+for Dynra to add. Dynra runs a successful bootstrap once.
+
+Use `bootstrap(force=True)` to run it again. Call `bootstrap_status()` to check
+the configuration, attempts, completion, and exported names.
 
 ## Agents
 
-The repository includes a [Dynra agent skill](.agents/skills/dynra/SKILL.md). Give that skill to an agent that can call the MCP server. It defines the live-development loop, patching constraints, failure handling, and the point at which a verified live change should become a source edit.
+An AI agent can use Dynra through MCP (Model Context Protocol). The repository
+includes a [Dynra agent skill](.agents/skills/dynra/SKILL.md). Give this skill
+to an agent that can call an MCP server. It explains how to inspect modules,
+change code, handle errors, and save tested changes.
 
-In a project-local MCP configuration, run the installed adapter through the
-project environment:
+The adapter must run in the project's Python environment.
+Use this project-local MCP configuration to start the adapter:
 
 ```json
 {
@@ -166,11 +177,11 @@ project environment:
 }
 ```
 
-The MCP client must launch this command with the target project as its working
-directory. If the configuration is global, set its supported `cwd` option to
-the target project. Start `uv run dynra` separately before using the tool.
+The MCP client must run this command from the target project folder. For a
+global configuration, set the client's `cwd` option to that folder.
+Start Dynra with `uv run dynra` before the agent uses the adapter.
 
-The adapter exposes structured tools for discovery and routine operations:
+The adapter provides tools to find sessions, inspect modules, and run code:
 
 ```text
 dynra_runtimes()
@@ -191,60 +202,47 @@ dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtim
 dynra_lifecycle_journal(runtime="", port=9999)
 ```
 
-`runtime` accepts a runtime ID, unambiguous project path, or registered port.
-The compatibility tool
-`dynra_repl(code, module="user", create=False, port=9999)` remains available.
-It selects an existing runtime by port and does not start a process. Imports are
-strict, and `create=True` is only for intentional synthetic namespaces.
+Use `runtime` to select a running Dynra session. Enter its ID, project path, or registered port.
+Older clients can use `dynra_repl(code, module="user", create=False, port=9999)`. It connects to a session on that port. It does not start Dynra.
+Imports use normal Python behavior. Set `create=True` only to make a new scratch module.
 
-### Fully interactive agent workflow
+### Agent workflow
 
-Use the structured tools by default. They return machine-readable values and
-avoid spending evaluations on command plumbing. Use `dynra_evaluate` for
-arbitrary expressions and complete definition replacements; keep `dynra_repl`
-only for clients that have not migrated to runtime discovery.
+Use these tools to inspect a project and run code. Dynra returns results that agents can read.
+Use `dynra_evaluate` to run expressions or replace full function and class definitions. Use `dynra_repl` only if the client cannot find sessions.
 
-| Need | Tool | Rule |
+| Need | Tool | Use |
 | --- | --- | --- |
-| Find a running project | `dynra_runtimes` | Select by runtime ID or unambiguous project path; never guess or scan ports. |
-| Check identity and freshness | `dynra_status` | Confirm project root and inspect generation/source state before mutation. |
-| Browse without importing | `dynra_modules`, `dynra_symbols` | Discover first; imports can start application code or side effects. |
-| Inspect implementation | `dynra_source` | Use a qualified top-level function or class. |
-| Start project-owned live state | `dynra_bootstrap_status`, then `dynra_bootstrap` | Bootstrap only when the task needs application state; Dynra never does this automatically. |
-| Explore or patch | `dynra_evaluate` | Select the owning module and send focused expressions or complete top-level definitions. |
-| Review live changes | `dynra_diff`, `dynra_events`, `dynra_patch_log` | Use events with a saved sequence cursor for incremental observation. |
-| Undo or save | `dynra_revert`, `dynra_persist` | Revert failed hypotheses; persist only behavior verified through a real consumer. |
-| Change managed resources | `dynra_lifecycle_plan` before `dynra_lifecycle_reconcile` | Reconcile only a safe plan. A refusal means restart or install/configure an adapter. |
-| Diagnose interrupted lifecycle work | `dynra_lifecycle_journal` | Read swap, compensation, cleanup, and recovery state before another mutation. |
+| Find a running project | `dynra_runtimes` | Select a session by ID or project path. Do not guess a port. |
+| Check a session | `dynra_status` | Check its project path and code state before a change. |
+| Find modules | `dynra_modules`, `dynra_symbols` | Find modules and names before import. Imports can run application code. |
+| Read code | `dynra_source` | Enter the full function or class name. |
+| Start application state | `dynra_bootstrap_status`, then `dynra_bootstrap` | Run bootstrap only when you need application state. Dynra does not run it for you. |
+| Run or change code | `dynra_evaluate` | Select a module. Send an expression or a full function or class. |
+| Review changes | `dynra_diff`, `dynra_events`, `dynra_patch_log` | Read current changes and past actions. |
+| Undo or save | `dynra_revert`, `dynra_persist` | Undo failed changes. Save changes only after you test them in the running application. |
+| Change application parts | `dynra_lifecycle_plan` before `dynra_lifecycle_reconcile` | Apply only a safe plan. If Dynra refuses, restart or add an adapter. |
+| Check an interrupted change | `dynra_lifecycle_journal` | Read the journal before you try another change. |
 
-Recommended loop:
+Follow these steps:
 
-1. Call `dynra_runtimes`, choose the target, and pin its runtime ID for every
-   subsequent call.
-2. Call `dynra_status`, `dynra_modules`, and `dynra_symbols` to establish the
-   runtime and owning module without speculative imports.
-3. If live application resources are required, inspect
-   `dynra_bootstrap_status`; call `dynra_bootstrap` once. Do not bootstrap for
-   static inspection or pure definition work.
-4. Read the current implementation with `dynra_source`, then reproduce the
-   behavior through the real loaded caller with `dynra_evaluate`.
-5. Replace one complete top-level function or class in its owning module.
-   Keep safe patch modes enabled and submit one definition at a time; ordinary
-   Python readers cannot observe a multi-definition publication atomically.
-6. Exercise the changed behavior through existing instances, imports,
-   registries, routes, or callbacks—not only by directly calling the new
-   definition.
-7. Inspect `source_sync` on every response. Stop on `conflict`, `error`, or
-   `restart-required`. Use `dynra_events(after=CURSOR)` to observe only work
-   performed since the last checkpoint.
-8. If managed components or tasks are affected, request
-   `dynra_lifecycle_plan`. Reconcile only when `safe` is true and
-   `requires_process_restart` is false. Never suppress unmanaged-holder or
-   missing-lifecycle refusals.
-9. Review `dynra_diff`. Revert an unsuccessful idea or persist the exact proven
-   definition. Then apply any remaining ordinary source/configuration edits.
-10. Run the project's durable checks. Live success proves the current process;
-    source control and tests prove the deliverable.
+1. Call `dynra_runtimes` and select the project. Use its runtime ID for later calls.
+2. Call `dynra_status`, `dynra_modules`, and `dynra_symbols`. Check the session and module before you change code.
+3. If you need application state, check `dynra_bootstrap_status`. Then call `dynra_bootstrap` once.
+4. Read the function or class with `dynra_source`. Reproduce the problem with `dynra_evaluate`.
+5. Replace one full function or class in its module. Send one definition at a time.
+   Keep safe function and class update modes enabled.
+   Other Python code can see each definition as Dynra publishes it.
+6. Test the change through existing objects, imports, routes, or callbacks. Do not test only the new function.
+7. Check `source_sync` after each response. Stop if it reports `conflict`, `error`, or `restart-required`.
+   Call `dynra_events(after=CURSOR)` to read later events.
+8. If the change affects components or tasks that an adapter manages, call `dynra_lifecycle_plan`.
+   Reconcile only when `safe` is true and `requires_process_restart` is false.
+   Do not ignore a refusal for an unmanaged object or missing lifecycle operation.
+9. Review `dynra_diff`. Undo a failed change or save the tested definition.
+   Then update any remaining source files or configuration.
+10. Run the project's tests and checks. Live testing checks the current session.
+    Version control and tests check the files you will deliver.
 
 Example:
 
@@ -267,60 +265,80 @@ dynra_diff(runtime="RUNTIME_ID")
 dynra_persist(target="shop.pricing.calculate_total", runtime="RUNTIME_ID")
 ```
 
-A successful live patch proves behavior in that process. It does not replace
-source control or the project's test suite.
+Live testing shows that a change works in the current session. It does not replace version control or project tests.
 
-## Namespace model
+## Switch between modules
 
-Dynra starts in a synthetic `user` namespace. Use the `module` argument on `dynra_repl` for atomic namespace selection. Within the REPL, these commands manage namespaces:
+Dynra starts in the scratch module named `user`. To run code in a project
+module, pass its name to `dynra_repl` or call `in_md(name)`.
 
-- `require_md(name)` imports a real module and preserves the original import failure.
-- `create_md(name)` creates a synthetic namespace without entering it.
-- `in_md(name)` enters an existing real or synthetic namespace.
-- `ls_md()` separates discovered, loaded-project, synthetic, and external modules.
-- `dir_md(name)` statically inspects an unloaded project module or lists a loaded module.
+- `require_md(name)` imports a project module and shows its import error.
+- `create_md(name)` creates a scratch module without switching to it.
+- `in_md(name)` switches to an existing project or scratch module.
+- `ls_md()` lists discovered, loaded, scratch, and external modules.
+- `dir_md(name)` lists names in a loaded module. It can inspect an unloaded
+  project module without importing it.
 
-Dynra supplies its commands through REPL builtins. It does not add those names to application module globals.
+Dynra makes these commands available in its interactive session. They do not
+become names in your application modules.
 
-## Source healing
+## Apply file changes to the running program
 
-Before each evaluation, Dynra checks the source-file signatures of tracked project modules. The clean path performs metadata checks only. Dynra parses a file after its signature changes.
+Before each evaluation, Dynra checks tracked project files. For an unchanged
+file, it checks only the file metadata. Dynra reads and parses a file after it
+changes.
 
-External edits to top-level functions and classes are applied automatically to the existing live objects. Prior imports and compatible instances therefore receive the new behavior without module reloads. Added definitions are evaluated in the live namespace. Deleted definitions are removed from the owning module and direct module imports. Each healed batch increments the module generation and appears in the response's `source_sync` field.
+When a tracked file changes, Dynra can update supported functions and classes
+in the running process. Existing imports and compatible instances can use the
+new code without a module reload. Dynra adds new definitions to the live
+module. It removes deleted definitions from that module and its direct imports.
+Each update batch increases the module's generation number and appears in the
+`source_sync` result.
 
-A module can repair derived state through an opt-in hook:
+A module can define this optional function to update related application state:
 
 ```python
 def __dynra_reconcile__(changes):
-    if any(change[\"definition\"].endswith(\".build_routes\") for change in changes):
+    if any(change["definition"].endswith(".build_routes") for change in changes):
         rebuild_routes_in_place()
 ```
 
-Dynra does not rerun arbitrary assignments, imports, decorators, or top-level side effects. To opt a literal constant into safe source healing, declare it explicitly:
+Dynra does not run changed assignments, imports, decorators, or other code that
+Python runs when it imports a module. To let Dynra update fixed values written
+directly in a file, list them in `__dynra_reloadable__`:
 
 ```python
 __dynra_reloadable__ = ("TAX_RATE", "FEATURE_ENABLED")
 ```
 
-Changed declared literals are copied into the live module. Undeclared assignments retain normal Python semantics. Import changes, decorator changes, removed declared constants, and declared non-literal values produce a structured `restart-required` result; Dynra never executes them during reconciliation. If both disk and the REPL changed the same definition, Dynra keeps the live definition and reports a conflict instead of guessing. `persist_source()` uses the captured base definition and refuses to overwrite an external edit.
+Dynra copies changed listed values into the live module. It leaves other
+assignments unchanged. Import or decorator changes, removed listed values, and
+values that are not fixed values written directly in the file need a process
+restart. Dynra reports these cases as `restart-required`.
 
-## Live patch model
+If a source file and the live session change the same definition, Dynra keeps
+the live version and reports a conflict. `persist_source()` saves the live
+definition only if the source file has not changed outside Dynra.
 
-Remote code executes one top-level statement at a time. After each function or class definition, Dynra reconciles the new object with the live object:
+## How Dynra updates running code
 
-- Safe function mode refuses incompatible closure layouts and sync/async changes when old objects still have direct holders.
-- Safe class mode refuses incompatible metaclass, base-class, and `__slots__` changes.
-- Existing decorated definitions retain their registration because Dynra does not rerun their decorators.
-- Multi-definition evaluation can roll back failures, but it does not isolate
-  concurrent ordinary Python readers between sequential publications.
+Dynra runs statements in order. It checks each new function or class and tries
+to update the object that is already in use.
 
-Transactions cover definition changes, not arbitrary external side effects from
-ordinary statements, first-time decorators, native extensions, or process
-configuration. Incompatible object layouts can still require a restart.
+- Safe function mode refuses incompatible changes to variables captured from outer functions.
+  It also refuses a change between normal and async behavior when old code still has references.
+- Safe class mode refuses incompatible changes to the metaclass, base classes, or `__slots__`.
+- Dynra does not run a decorator again when it replaces a decorated definition. This keeps its registration.
+- If an evaluation defines several functions or classes and one fails, Dynra can undo earlier definition changes. Other Python code can read between updates.
 
-### Evolving existing instances
+Dynra can undo definition changes. It cannot undo effects from ordinary
+statements, first-time decorators, native extensions, or process settings.
+Some incompatible object changes need a restart.
 
-Add `__dynra_update__` when a compatible class patch needs to initialize state on existing instances:
+### Updating existing instances
+
+Add `__dynra_update__` to a class when existing objects need new state after a
+compatible class change:
 
 ```python
 class Session:
@@ -335,90 +353,108 @@ class Session:
             self.status = "active"
 ```
 
-After the patch, existing `Session` instances use the new methods and run `__dynra_update__`.
+After the change, existing `Session` objects use the new methods. Dynra calls
+`__dynra_update__` on each existing object.
 
-## Runtime commands
+## Dynra commands
 
 | Command | Purpose |
 | --- | --- |
-| `create_md(name)` | Create a synthetic scratch module. |
-| `require_md(name)` | Import a real module and surface its complete import error. |
-| `in_md(name)` | Enter an existing real or synthetic module. |
-| `ls_md()` | List discovered, loaded-project, synthetic, and external modules. |
-| `dir_md(module=None)` | List symbols, including static inspection of unloaded project modules. |
-| `doc(obj)` / `source(obj)` | Show documentation or live source. |
-| `find_var(pattern)` | Search loaded modules for matching symbol names. |
-| `function_patch_mode(mode=None)` | Read or set `safe` or `permissive` function patching. |
-| `class_patch_mode(mode=None)` | Read or set `safe` or `permissive` class patching. |
-| `unmap(name)` | Delete a binding and report remaining direct holders and qualified module aliases. |
-| `patch_log()` | Show applied, refused, reverted, and persisted operations. |
-| `events(after=0, limit=None)` | Read append-only structured audit events by sequence cursor. |
-| `revert(target)` / `revert_all()` | Restore one or all live definition snapshots; `target` may be the live function/class object or a qualified name. |
-| `diverged()` / `source_patch()` | Show unified diffs between live definitions and source files. |
-| `persist_source(target=None)` | Write exact evaluated definitions to their project source files. |
-| `source_sync_status(module=None)` | Show source freshness, conflicts, applied outcomes, restart-required diagnostics, live definitions, and generation. |
-| `help_dynra()` | Show runtime help. |
+| `create_md(name)` | Create a scratch module. |
+| `require_md(name)` | Import a project module and show its import error. |
+| `in_md(name)` | Switch to an existing project or scratch module. |
+| `ls_md()` | List discovered, loaded, scratch, and external modules. |
+| `dir_md(module=None)` | List names in a module. It can inspect an unloaded module without importing it. |
+| `doc(obj)` / `source(obj)` | Show an object's help text or source code. |
+| `find_var(pattern)` | Search loaded modules for names that match a pattern. |
+| `function_patch_mode(mode=None)` | Read or set safe or permissive updates for functions. |
+| `class_patch_mode(mode=None)` | Read or set safe or permissive updates for classes. |
+| `unmap(name)` | Remove a name and report code that still refers to it. |
+| `patch_log()` | List applied, refused, undone, and saved changes. |
+| `events(after=0, limit=None)` | Read recorded events after a sequence number. |
+| `revert(target)` / `revert_all()` | Restore one or all saved definitions by object or name. |
+| `diverged()` / `source_patch()` | Show differences between live code and source files. |
+| `persist_source(target=None)` | Save evaluated definitions to project files. |
+| `source_sync_status(module=None)` | Show file changes, conflicts, results, restart needs, and module generation. |
+| `help_dynra()` | Show Dynra help. |
 
 ## Terminal client
 
-The interactive runtime accepts normal IPython input. `dynra-client` sends a one-off evaluation to an existing runtime:
+The Dynra terminal session accepts normal Python input. `dynra-client` sends one evaluation to a running session:
 
 ```bash
 dynra-client --module package.module "expression"
 dynra-client --module scratch --create "value = 1"
 ```
 
-## Optional lifecycle adapters
+## Optional adapters for application changes
 
-Dynra remains a development dependency. Production modules do not import Dynra,
-use proxy domain values, or decorate handlers. Optional development packages
-publish adapters through the `dynra.adapters` entry-point group:
+Dynra belongs in development dependencies. Production modules do not import
+Dynra, use its proxy values, or add its decorators.
+An optional development package can provide an adapter. The adapter tells
+Dynra how to update selected application parts. Dynra calls each part a component.
 
 ```toml
 [project.entry-points."dynra.adapters"]
 example = "dynra_example:adapter"
 ```
 
-Adapters register watched components and explicit lifecycle operations. Dynra
-builds a deterministic impact plan before mutation, prepares and validates
-replacements before an atomic holder swap, and compensates after post-swap
-failure. Missing operations, unmanaged holders, dependency cycles, restart-only
-bindings, and tasks without a compatible supervision policy are refused with
-machine-readable evidence.
+An adapter lists the components that Dynra can update. It provides an update
+rule for each component. Dynra creates a repeatable plan before each change.
+The same inputs produce the same plan.
 
-The adapter API is exported from `dynra`: `ComponentAdapter`, `ChangeSet`,
+Dynra prepares and checks replacements before it changes references in one step.
+If a later step fails, Dynra tries to restore the old state.
+
+Dynra refuses changes in these cases:
+
+- An update rule is missing.
+- An adapter does not control a reference.
+- Components form a dependency cycle.
+- A reference requires a restart.
+- No safe task policy exists.
+
+Each refusal returns structured details to the client.
+
+Dynra exports these adapter types and helpers: `ComponentAdapter`, `ChangeSet`,
 `LifecycleRuntime`, `ManagedHolder`, `RuntimeGraph`, `TaskSupervisor`,
 `TaskPolicy`, `BindingKind`, and `migrate_instances`.
 
-Adapters are discovered lazily when the first lifecycle plan or reconciliation
-is requested. A project can opt into an unpublished or project-local adapter
-without adding production imports:
+Dynra loads an adapter when you request a plan or change. A project can use a
+local adapter without importing Dynra in production code:
 
 ```toml
 [tool.dynra]
 adapters = ["my_project.dev_adapter:adapter"]
 ```
 
-The module must be importable from the project's development environment. The
-value is a `module` or `module:attribute` target; Dynra never scans arbitrary
-project modules for adapters. Install the optional Stario integration with:
+The adapter module must be available in the project's development environment.
+Set the value to `module` or `module:attribute`. Dynra loads only listed
+adapters. It does not search the project for other adapters.
+
+Install the optional Stario adapter:
 
 ```bash
 uv add --dev dynra-stario
 ```
 
-It preserves the loaded `stario.App`, listener, Relay, active requests,
-unaffected tasks, and streams while atomically publishing rebuilt routes and
-middleware. In the development bootstrap, wrap only side-effect-free route
-registration in `dynra_stario.compose_routes(app, build_routes)`; the adapter
-replays that function without restarting listeners, databases, or tasks. The
-production bootstrap can continue to call `build_routes(app)` directly, so
-removing the development dependencies does not affect application startup.
-A changed running task is refused unless a Dynra `TaskSupervisor`
-defines its replacement policy; Dynra never rewrites suspended coroutine frames.
+The Stario adapter can keep the loaded `stario.App`, listener, Relay, active
+requests, unchanged tasks, and streams while Dynra rebuilds routes and
+middleware.
 
-Agents can inspect and operate lifecycle reconciliation without evaluating
-arbitrary helper code:
+In the development bootstrap, call
+`dynra_stario.compose_routes(app, build_routes)` to register routes.
+The route function must not perform side effects because Dynra calls it again.
+Dynra can then rebuild routes without restarting listeners, databases, or tasks.
+
+The production bootstrap can call `build_routes(app)` directly. Removing Dynra
+from development dependencies does not change application startup.
+
+To replace a running task, a `TaskSupervisor` must define a replacement policy.
+Dynra cannot rewrite an async task while that task is waiting.
+
+Agents can use these tools to plan and apply lifecycle changes. The tools also
+show the change history:
 
 ```text
 dynra_lifecycle_plan(definitions, source_before={}, source_after={}, runtime="", port=9999)
@@ -426,55 +462,72 @@ dynra_lifecycle_reconcile(definitions, source_before={}, source_after={}, runtim
 dynra_lifecycle_journal(runtime="", port=9999)
 ```
 
-For a managed definition change, pass one qualified function name and matching
-source text in `source_before` and `source_after`. Dynra refuses
-multi-definition lifecycle publication because ordinary Python global reads
-cannot be isolated across sequential assignments. It also refuses lifecycle
-staging for classes, decorators, extra top-level statements, and
-definition-time expressions that can call user code; use a process restart for
-those changes.
+For a managed function change, provide one full function name and the old and
+new source code in `source_before` and `source_after`.
 
-For an accepted function change, Dynra quiesces affected components, compiles
-the definition into an isolated namespace, and exposes the candidate to
-adapters as `ChangeSet.staged_definitions`. Staging preserves the live
-function's postponed-annotation compiler semantics, so resolved and unresolved
-annotations retain their original string form. Only after every component,
-binding, and gated task replacement prepares and validates does Dynra publish
-the function and managed component/binding generation. This boundary is
-failure-atomic, not reader-isolated: ordinary Python global reads and separate
-holder reads can straddle publication. Managed consumers must use one
-`LifecycleRuntime.snapshot()` for related components and bindings.
-Transactions serialize per runtime and per shared live adapter resource.
-Definition publication, preparation, validation, or commit failure restores
-definitions and managed resources when compensation succeeds. Cleanup runs
-after the new generation commits; cleanup failure retains it and records
-`cleanup-incomplete`. Missing quiescence or compensation refuses before
-mutation.
+Dynra refuses to publish several definitions at once. Other Python code could
+read the definitions between updates. Dynra also refuses managed changes to
+classes, decorators, extra top-level statements, or expressions that call user
+code while Python defines a function. Use a process restart for these changes.
 
-Affected supervised tasks use their declared `never`, `manual`, `safe-point`,
-`drain`, `rolling`, or `immediate` policy. `never`, unapproved `manual`, stale
-zero-argument rolling readiness, rolling replacement that depends on an
-unpublished staged definition, and decorated definition reconciliation refuse
-before publication. Decorator registration must live in adapter-owned
-composition. Each attempted task outcome is journaled.
+For an accepted function change, Dynra pauses the affected components. It
+compiles the new function in a separate dictionary. It gives the function to
+adapters as `ChangeSet.staged_definitions`.
 
-`dynra_lifecycle_plan` never mutates runtime state. A reconciliation rebuilds
-only the affected dependency subgraph; unchanged prerequisites retain object
-identity. Components and bindings become visible through one immutable
-generation snapshot. Adapter code must read related managed values from
-`LifecycleRuntime.snapshot()`; separate holder or module-global reads are not a
-transaction.
-The durable per-project journal records source hashes, preparation, task
-outcomes, the atomic swap point, cleanup, compensation, and restart recovery
-state. Concrete framework semantics belong in separate optional packages.
+Dynra preserves the live function's rules for deferred annotations during
+compilation. Resolved and unresolved annotations keep their original string
+form. Dynra checks all components, references, and task replacements before
+it publishes the function and the new component version.
+
+If a change fails, Dynra runs restore actions. If they succeed, Dynra restores
+the old state. Other Python code can still read different versions during a
+change. Use one `LifecycleRuntime.snapshot()` call to read related values.
+
+Dynra applies one change at a time for each runtime and shared adapter resource.
+If preparation, validation, publication, or commit fails, Dynra tries to
+restore the old definitions and resources.
+
+Dynra removes old resources after it makes the new version active. If cleanup
+fails, Dynra keeps the new version and records `cleanup-incomplete`. Dynra
+refuses a change before it starts if it cannot pause affected work or restore
+the old state after a failure.
+
+A `TaskSupervisor` controls how Dynra replaces a running async task:
+
+- `never`: Do not replace the task.
+- `manual`: Get approval before replacement.
+- `safe-point`: Wait for the task to mark a safe point.
+- `drain`: Call the configured drain function.
+- `rolling`: Start a replacement and wait for its readiness check.
+- `immediate`: Replace the task during commit.
+
+Dynra refuses `never` tasks and `manual` tasks without approval. A `drain` task
+needs a drain function. A `rolling` readiness check must accept the replacement
+task. Dynra refuses a rolling change that needs code it has not published.
+Dynra also refuses decorated definitions. Put decorator registration in the
+adapter's route or component setup. Dynra records each task result.
+
+`dynra_lifecycle_plan` reports a plan. It does not change the running process.
+Reconciliation updates only affected components. Unchanged components keep
+their existing objects.
+
+Dynra publishes components and references through one versioned
+`LifecycleRuntime.snapshot()`. Adapter code must use one snapshot to read
+related values. Separate reads can return values from different versions.
+
+The project journal records source hashes, preparation, task results, the
+change point, cleanup, restore actions, and recovery state. Use a separate
+optional package for framework-specific rules.
 
 ## Security
 
-Dynra executes arbitrary Python by design. Use it only for trusted local development. Do not expose its TCP port to untrusted networks, and do not grant untrusted agents access to the MCP server.
+Dynra runs arbitrary Python code. Use it only for trusted local development.
+Do not expose its network port to untrusted systems. Do not let untrusted agents
+use its MCP server.
 
 ## Development
 
-Develop Dynra in its own environment:
+Use a separate environment to develop Dynra:
 
 ```bash
 git clone https://github.com/antlobach/Dynra.git
@@ -484,7 +537,7 @@ uv run pytest -q
 uv build
 ```
 
-To exercise an unreleased checkout from another project, install it there as an
+To test an unreleased Dynra checkout in another project, install it as an
 editable development dependency:
 
 ```bash
@@ -493,16 +546,16 @@ uv add --dev --editable /path/to/Dynra
 uv run dynra
 ```
 
-Before committing that project's dependency files, replace the local path with
-the published package:
+Before you commit the project's dependency files, replace the local checkout
+with the published Dynra package:
 
 ```bash
 uv remove --dev dynra
 uv add --dev dynra
 ```
 
-CI runs the test suite on Python 3.10 through 3.14 and builds the package.
+CI tests Dynra on Python 3.10 through 3.14. CI also builds the package.
 
 ## License
 
-Dynra is licensed under the [Apache License 2.0](LICENSE).
+Dynra uses the [Apache License 2.0](LICENSE).
