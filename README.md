@@ -82,6 +82,50 @@ dynra clean
 validates registered processes against the Dynra handshake and removes stale
 records. Set `DYNRA_RUNTIME_DIR` to override the registry location.
 
+### Emacs setup
+
+#### 1. Add Dynra to the Python project
+
+From the project root:
+
+```bash
+uv add --dev dynra
+```
+
+#### 2. Install the Emacs plugin
+
+Add the plugin directory from your Dynra checkout to your Emacs configuration
+(usually `~/.emacs.d/init.el` or `~/.config/emacs/init.el`):
+
+```elisp
+(add-to-list 'load-path "/path/to/Dynra/editors/emacs")
+(require 'dynra)
+(dynra-auto-mode 1)
+```
+
+Replace the path with the actual checkout path, then restart Emacs or evaluate
+the configuration. The plugin requires Emacs 27.1 or newer.
+
+#### 3. Start Dynra and evaluate Python
+
+Open a Python file inside the project, then run `M-x dynra-jack-in` or press
+`C-c C-x j`. Dynra starts with the project's `uv` environment and connects to
+the project runtime. Evaluate the statement at point with `C-x C-e`, a function
+or class with `C-c C-c`, or the whole buffer with `C-c C-k`; results appear
+inline and in the echo area.
+
+`dynra-auto-mode` connects to an already-running runtime when a project file
+opens. Starting a runtime automatically is optional:
+
+```elisp
+(setq dynra-auto-jack-in t)
+```
+
+If Emacs cannot find `uv`, Dynra checks `~/.local/bin` and common Homebrew and
+Linuxbrew locations. For a custom location, set `dynra-command` to the absolute
+`uv` path. See [`editors/emacs/README.md`](editors/emacs/README.md) for all
+commands and customization options.
+
 ### Explicit project bootstrap
 
 Dynra never starts the application automatically. A project can declare an

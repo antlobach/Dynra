@@ -390,7 +390,7 @@ wheels = [
 
 [[package]]
 name = "dynra"
-version = "0.3.1"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "ipython", version = "8.38.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -402,6 +402,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "dynra" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -415,6 +416,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "dynra", editable = "." },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=6.0" },
 ]

@@ -1,6 +1,6 @@
 [project]
 name = "dynra"
-version = "0.3.1"
+version = "0.4.0"
 description = "Live Python runtime for LLM coding agents"
 readme = "README.md"
 license = "Apache-2.0"
@@ -46,8 +46,12 @@ where = ["src"]
 [tool.uv]
 package = true
 
+[tool.uv.sources]
+dynra = { workspace = true }
+
 [dependency-groups]
 dev = [
+    "dynra",
     "pytest>=8.0",
     "pytest-cov>=6.0",
 ]

@@ -1209,6 +1209,8 @@ class NamespaceManager:
 
     def _create_module(self, name):
         self._validate_module_name(name)
+        if name not in self.project.modules:
+            self.project.refresh_modules()
         if name in self.project.modules:
             raise ValueError(f"{name!r} is a project module; use require_md({name!r})")
         existing = sys.modules.get(name)
@@ -1235,6 +1237,8 @@ class NamespaceManager:
     def require_md(self, name):
         """Import an existing module, preserving the original import failure."""
         self._validate_module_name(name)
+        if name not in self.project.modules:
+            self.project.refresh_modules()
         if name in self.synthetic_modules:
             return sys.modules[name]
         return importlib.import_module(name)

@@ -53,6 +53,25 @@ def test_src_layout_discovery_is_strict_and_does_not_pollute_modules(tmp_path):
         sys.modules.pop("sample", None)
         sys.modules.pop("scratch_space", None)
 
+def test_new_project_module_is_discovered_without_restarting_runtime(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'sample'\nversion = '1.0'\n",
+        encoding="utf-8",
+    )
+    manager = NamespaceManager(project_root=tmp_path)
+    module_name = "module2"
+    try:
+        assert module_name not in manager.module_catalog()["discovered"]
+        (tmp_path / "module2.py").write_text("VALUE = 42\n", encoding="utf-8")
+
+        module = manager.in_md(module_name)
+
+        assert module.VALUE == 42
+        assert module_name in manager.module_catalog()["discovered"]
+    finally:
+        sys.modules.pop(module_name, None)
+
+
 
 def test_statements_observe_redefinitions_immediately_and_skip_old_decorators(tmp_path):
     manager = NamespaceManager(project_root=tmp_path)

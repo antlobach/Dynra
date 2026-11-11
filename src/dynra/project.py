@@ -181,6 +181,11 @@ class ProjectLayout:
                 modules.setdefault(name, ModuleInfo(name, resolved, is_package))
         return modules
 
+    def refresh_modules(self) -> dict[str, ModuleInfo]:
+        """Refresh and return the project module catalog."""
+        self.modules = self._discover_modules()
+        return self.modules
+
     def public_symbols(self, module_name: str) -> tuple[str, ...]:
         info = self.modules.get(module_name)
         if info is None:
