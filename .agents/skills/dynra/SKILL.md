@@ -1,6 +1,6 @@
 ---
 name: dynra
-description: Develop Python through a long-lived Dynra REPL. Define and evaluate small functions or classes in project modules, test them against retained application state, save verified definitions, and continue without routine restarts.
+description: Develop Python through a long-lived Dynra REPL. Define and revise functions, async functions, classes, and methods in project modules. Test changes through retained instances and existing callers, save verified definitions, and continue without routine restarts.
 ---
 
 # Dynra
@@ -15,16 +15,22 @@ Start a Dynra runtime for the project. Connect the MCP adapter to that runtime.
 Prepare application state when the task needs it. Then develop one small piece
 at a time inside that same process.
 
-The live session contains your working functions, classes, imported modules,
-and application objects. You can inspect an object, change a function, and call
-that function against the same object. You do not need to reconstruct the data
-after each supported change.
+The live session contains your functions, classes, imported modules, and
+application objects. Define a class, create an instance, and evaluate a revised
+class definition. Compatible existing instances use the updated methods while
+keeping their data and identity. You do not need to recreate those instances.
+
+You can also add methods, redefine normal or async functions, inspect values,
+and run Python expressions against live objects. Test supported changes
+through existing imports, callbacks, and instances, not only direct function
+calls. Some object or resource changes still require an adapter or a restart.
 
 Use this development loop:
 
 1. **Choose a module.** Find the real project module that should own the code.
 2. **Define a small piece.** Evaluate one complete function or class in that module.
-3. **Exercise it now.** Call the function with known inputs. Inspect the result and any state changes.
+3. **Exercise it now.** Call a function or a method on an existing instance.
+   Inspect its result and any changes to application state.
 4. **Improve it in place.** Evaluate a revised definition if the result is wrong.
    Test through existing callers and objects as well as direct calls.
 5. **Save the verified code.** Review the live diff. Persist the tested definition to its source file.
@@ -33,7 +39,7 @@ Use this development loop:
 
 Do not use a new Python process for each expression. Do not rewrite a whole
 module and rerun the application for each small change. Do not reload a module
-to make an ordinary supported function update visible.
+to make a supported function or class update visible.
 
 The runtime owns the state. Individual MCP calls can use separate connections
 to that same runtime. Reconnecting to it does not create a new application.
@@ -43,6 +49,51 @@ The runtime does not store the agent's conversation or replace source control.
 Keep full restarts to a minimum, not to zero. Restart when Dynra reports a
 restart boundary or when the requested change cannot preserve the live state
 safely. Never disable a safety check just to avoid restarting.
+
+### Example: update a class through an existing instance
+
+Use a real project module with a source file. This example uses
+`dynra_demo.app`. Replace `RUNTIME_ID` with the discovered runtime ID.
+
+```python
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.app",
+    code="class Invoice:\n    def __init__(self, prices):\n        self.prices = list(prices)\n    def total(self):\n        return sum(self.prices)",
+)
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.app",
+    code="invoice = Invoice([10, 20])\noriginal_invoice = invoice\noriginal_class = Invoice\noriginal_prices = invoice.prices\ninvoice.total()",
+)
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.app",
+    code="class Invoice:\n    def __init__(self, prices):\n        self.prices = list(prices)\n    def total(self):\n        return round(sum(self.prices) * 1.2, 2)\n    def label(self):\n        return f'Total: {self.total():.2f}'",
+)
+dynra_evaluate(
+    runtime="RUNTIME_ID",
+    module="dynra_demo.app",
+    code="(invoice is original_invoice, type(invoice) is original_class, invoice.prices is original_prices, invoice.total(), invoice.label())",
+)
+dynra_diff(runtime="RUNTIME_ID")
+dynra_persist(
+    runtime="RUNTIME_ID",
+    target="dynra_demo.app.Invoice",
+)
+```
+
+The first total is `30`. After the class update, the result is
+`(True, True, True, 36.0, 'Total: 36.00')`. The original instance uses both the
+revised `total` method and the new `label` method. The instance, class, and
+prices list keep their identities. Do not call `Invoice(...)` again to check
+this propagation.
+
+Redefining `__init__` does not rerun it on existing instances. If an updated
+method needs new instance fields, use `__dynra_update__(self)` to initialize
+them. Incompatible metaclass, base-class, or `__slots__` changes can require
+a restart.
+
 
 ### Example: define, evaluate, save, continue
 
