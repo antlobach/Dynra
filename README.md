@@ -324,6 +324,9 @@ definition only if the source file has not changed outside Dynra.
 
 Dynra runs statements in order. It checks each new function or class and tries
 to update the object that is already in use.
+This includes private functions, async functions, and classes with names such
+as `_add` and `_Basket`. Existing imports and compatible instances receive
+supported changes without a restart.
 
 - Safe function mode refuses incompatible changes to variables captured from outer functions.
   It also refuses a change between normal and async behavior when old code still has references.

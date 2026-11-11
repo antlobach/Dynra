@@ -1,3 +1,4 @@
+import asyncio
 import builtins
 import sys
 
@@ -103,6 +104,72 @@ def test_statements_observe_redefinitions_immediately_and_skip_old_decorators(tm
         assert module.observed == 2
     finally:
         sys.modules.pop("dynra_sequential", None)
+
+
+@pytest.mark.parametrize("name", ["_add", "__add__"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_private_function_update_reaches_existing_imports(tmp_path, name, asynchronous):
+    manager = NamespaceManager(project_root=tmp_path)
+    origin = manager.create_md("dynra_private_origin")
+    consumer = manager.create_md("dynra_private_consumer")
+    shell = _attach_shell(manager, origin)
+    prefix = "async " if asynchronous else ""
+
+    def invoke(function):
+        result = function(1, 1)
+        return asyncio.run(result) if asynchronous else result
+
+    try:
+        assert manager.execute_code(
+            f"{prefix}def {name}(x, y):\n    return x + y"
+        ).success
+        exec(f"from {origin.__name__} import {name} as calculate", consumer.__dict__)
+        original = consumer.calculate
+        assert invoke(original) == 2
+
+        # Evaluating a function object also puts it in the shell's `_` cache.
+        assert shell.run_cell(name).success
+        assert manager.execute_code(
+            f"{prefix}def {name}(x, y):\n    return x + y + x"
+        ).success
+
+        assert consumer.calculate is original
+        assert getattr(origin, name) is original
+        assert invoke(consumer.calculate) == 3
+        assert invoke(shell.user_ns["_"]) == 3
+
+        manager.revert(f"{origin.__name__}.{name}")
+        assert invoke(consumer.calculate) == 2
+    finally:
+        sys.modules.pop(origin.__name__, None)
+        sys.modules.pop(consumer.__name__, None)
+
+
+def test_private_class_update_reaches_existing_instance(tmp_path):
+    manager = NamespaceManager(project_root=tmp_path)
+    module = manager.create_md("dynra_private_class")
+    _attach_shell(manager, module)
+    try:
+        assert manager.execute_code(
+            "class _Basket:\n"
+            "    def __init__(self):\n        self.prices = [10, 20]\n"
+            "    def total(self):\n        return sum(self.prices)\n"
+            "basket = _Basket()\n"
+        ).success
+        original = module._Basket
+        instance = module.basket
+
+        assert manager.execute_code(
+            "class _Basket:\n"
+            "    def total(self):\n        return sum(self.prices) + 1\n"
+        ).success
+
+        assert module._Basket is original
+        assert module.basket is instance
+        assert instance.prices == [10, 20]
+        assert instance.total() == 31
+    finally:
+        sys.modules.pop(module.__name__, None)
 
 
 def test_failed_multi_definition_patch_rolls_back_every_definition(tmp_path):
